@@ -65,6 +65,8 @@ const userSchema = new mongoose.Schema({
   firebaseUid: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true },
   role: { type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'], default: 'farmer' },
+  ageVerified: { type: Boolean, default: false },
+  age: { type: Number },
   profile: {
     name: { type: String, required: true },
     teluguName: { type: String },
@@ -104,6 +106,8 @@ const userSchema = new mongoose.Schema({
     average: { type: Number, default: 0 },
     count: { type: Number, default: 0 },
   },
+  isActive: { type: Boolean, default: true },
+  deletedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
@@ -136,6 +140,7 @@ const equipmentSchema = new mongoose.Schema({
   ratings: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
   isVerified: { type: Boolean, default: false },
   totalRentals: { type: Number, default: 0 },
+  isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -159,6 +164,7 @@ const produceSchema = new mongoose.Schema({
   harvestDate: Date,
   images: [String],
   isAvailable: { type: Boolean, default: true },
+  isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -177,10 +183,21 @@ const bookingSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+const reportSchema = new mongoose.Schema({
+  reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  type: { type: String, enum: ['user', 'equipment', 'produce'], required: true },
+  targetId: { type: mongoose.Schema.Types.ObjectId, required: true },
+  reason: { type: String, required: true },
+  description: { type: String },
+  status: { type: String, enum: ['pending', 'reviewed', 'resolved'], default: 'pending' },
+  createdAt: { type: Date, default: Date.now },
+});
+
 const User = mongoose.model('User', userSchema);
 const Equipment = mongoose.model('Equipment', equipmentSchema);
 const Produce = mongoose.model('Produce', produceSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
+const Report = mongoose.model('Report', reportSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -192,7 +209,6 @@ const authenticate = async (req, res, next) => {
 
     const idToken = authHeader.split(' ')[1];
     
-    // Demo mode for testing without Firebase
     if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
       req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer' };
       return next();
@@ -215,6 +231,10 @@ const authenticate = async (req, res, next) => {
         },
       });
     }
+    
+    if (!user.isActive) {
+      return res.status(401).json({ error: 'Account has been deactivated' });
+    }
 
     req.user = user;
     next();
@@ -224,9 +244,7 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// ==================== API ROUTES ====================
-
-// HEALTH CHECK - Improved for Koyeb
+// ==================== HEALTH CHECK ====================
 app.get('/health', async (req, res) => {
   const dbState = mongoose.connection.readyState;
   const dbStatus = {
@@ -254,14 +272,70 @@ app.get('/', (req, res) => {
     status: 'active',
     endpoints: {
       health: 'GET /health',
-      auth: 'GET /api/auth/me, PUT /api/auth/role, PUT /api/auth/profile',
+      auth: 'POST /api/auth/google, GET /api/auth/me, PUT /api/auth/role',
       equipment: 'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
       produce: 'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
       bookings: 'GET,POST /api/bookings, PUT /api/bookings/:id',
-      users: 'GET /api/users/:id',
-      dashboard: 'GET /api/dashboard/stats',
+      users: 'DELETE /api/users/delete-account, GET /api/users/export-data',
+      reports: 'POST /api/reports',
     },
   });
+});
+
+// ==================== GOOGLE AUTH ROUTE ====================
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const { email, name, picture, googleId } = req.body;
+    
+    let user = await User.findOne({ email });
+    
+    if (!user) {
+      user = await User.create({
+        firebaseUid: googleId,
+        email: email,
+        profile: {
+          name: name,
+          profileImage: picture,
+        },
+        verification: { isVerified: false },
+        ageVerified: false,
+      });
+    }
+    
+    res.json({
+      success: true,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        profile: user.profile,
+        verification: user.verification,
+        ageVerified: user.ageVerified,
+      },
+    });
+  } catch (error) {
+    console.error('Google auth error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== AGE VERIFICATION ====================
+app.post('/api/auth/verify-age', authenticate, async (req, res) => {
+  try {
+    const { age } = req.body;
+    
+    if (age < 18) {
+      return res.status(400).json({ error: 'You must be 18 years or older to use AgriAgent' });
+    }
+    
+    req.user.ageVerified = true;
+    req.user.age = age;
+    await req.user.save();
+    
+    res.json({ success: true, message: 'Age verified successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ==================== AUTH ROUTES ====================
@@ -278,6 +352,7 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
         labourerDetails: req.user.labourerDetails,
         contractorDetails: req.user.contractorDetails,
         ratings: req.user.ratings,
+        ageVerified: req.user.ageVerified,
       },
     });
   } catch (error) {
@@ -316,11 +391,104 @@ app.put('/api/auth/profile', authenticate, async (req, res) => {
   }
 });
 
+// ==================== USER MANAGEMENT (GDPR Compliant) ====================
+
+// Delete user account - GDPR Right to Erasure
+app.delete('/api/users/delete-account', authenticate, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    
+    // Soft delete - mark as inactive and set deletion date
+    await User.findByIdAndUpdate(userId, { 
+      isActive: false, 
+      deletedAt: new Date(),
+      'profile.name': '[Deleted User]',
+      'profile.phone': null,
+    });
+    
+    // Delete user's listings (hard delete for privacy)
+    await Equipment.deleteMany({ ownerId: userId });
+    await Produce.deleteMany({ farmerId: userId });
+    
+    // Anonymize bookings
+    await Booking.updateMany(
+      { $or: [{ renterId: userId }, { ownerId: userId }] },
+      { 
+        $set: { 
+          renterId: null, 
+          ownerId: null,
+          totalAmount: 0,
+        } 
+      }
+    );
+    
+    res.json({ success: true, message: 'Account permanently deleted' });
+  } catch (error) {
+    console.error('Delete account error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Export user data - GDPR Right to Access
+app.get('/api/users/export-data', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('-__v');
+    const equipment = await Equipment.find({ ownerId: req.user._id });
+    const produce = await Produce.find({ farmerId: req.user._id });
+    const bookings = await Booking.find({ 
+      $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] 
+    });
+    
+    res.json({
+      success: true,
+      exportedAt: new Date(),
+      data: {
+        user,
+        equipment,
+        produce,
+        bookings,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== REPORT ROUTE ====================
+app.post('/api/reports', authenticate, async (req, res) => {
+  try {
+    const { type, targetId, reason, description } = req.body;
+    
+    if (!['user', 'equipment', 'produce'].includes(type)) {
+      return res.status(400).json({ error: 'Invalid report type' });
+    }
+    
+    const report = await Report.create({
+      reporterId: req.user._id,
+      type,
+      targetId,
+      reason,
+      description,
+    });
+    
+    console.log(`📢 New report created: ${type}/${targetId} by ${req.user.email}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Report submitted successfully. We will review within 24 hours.',
+      reportId: report._id,
+    });
+  } catch (error) {
+    console.error('Report error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== EQUIPMENT ROUTES ====================
 app.get('/api/equipment', async (req, res) => {
   try {
     const { category, search } = req.query;
-    let query = { 'availability.isAvailable': true };
+    let query = { 'availability.isAvailable': true, isActive: true };
     
     if (category && category !== 'all') query.category = category;
     if (search) {
@@ -394,7 +562,7 @@ app.delete('/api/equipment/:id', authenticate, async (req, res) => {
 app.get('/api/produce', async (req, res) => {
   try {
     const { crop, search, organic } = req.query;
-    let query = { isAvailable: true };
+    let query = { isAvailable: true, isActive: true };
     
     if (crop && crop !== 'all') query.cropName = crop;
     if (search) {
