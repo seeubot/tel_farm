@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
 const { OAuth2Client } = require('google-auth-library');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
@@ -224,6 +225,24 @@ const authenticate = async (req, res, next) => {
     if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
       req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer' };
       return next();
+    }
+
+    // JWT token (from mobile callback)
+    if (rawToken.startsWith('eyJ')) {
+      try {
+        const decoded = jwt.verify(rawToken, process.env.JWT_SECRET || 'agriagent-secret-key');
+        const user = await User.findById(decoded.userId);
+        if (!user) {
+          return res.status(401).json({ error: 'User not found' });
+        }
+        if (!user.isActive) {
+          return res.status(401).json({ error: 'Account has been deactivated' });
+        }
+        req.user = user;
+        return next();
+      } catch (jwtError) {
+        return res.status(401).json({ error: 'Invalid JWT token' });
+      }
     }
 
     // PKCE / Google access token
@@ -558,13 +577,11 @@ function getRedirectHTML(data, error, logs = []) {
               setTimeout(() => document.body.removeChild(a), 1000);
               break;
             case 'intent':
-              // For Android
               const intentUrl = 'intent://auth?' + deepLink.split('?')[1] + '#Intent;scheme=agriagent;package=com.yourcompany.agriagent;end';
               window.location.href = intentUrl;
               break;
           }
           
-          // Check if redirect worked
           setTimeout(() => {
             addLog('Still on page after ' + method + ' redirect attempt');
           }, 1500);
@@ -572,18 +589,12 @@ function getRedirectHTML(data, error, logs = []) {
 
         function retryRedirect() {
           addLog('Manual retry initiated');
-          
-          // Try multiple methods sequentially
           tryRedirect('location');
-          
           setTimeout(() => {
             addLog('Trying alternative redirect methods...');
             tryRedirect('iframe');
           }, 1500);
-          
           setTimeout(() => tryRedirect('anchor'), 3000);
-          
-          // For Android, try intent
           if (/android/i.test(navigator.userAgent)) {
             setTimeout(() => tryRedirect('intent'), 4500);
           }
@@ -596,13 +607,11 @@ function getRedirectHTML(data, error, logs = []) {
           textarea.style.opacity = '0';
           document.body.appendChild(textarea);
           textarea.select();
-          
           try {
             document.execCommand('copy');
             addLog('✅ Deep link copied to clipboard');
             alert('Deep link copied! You can paste and open it in your notes app.');
           } catch (err) {
-            // Modern clipboard API
             navigator.clipboard.writeText(deepLink).then(() => {
               addLog('✅ Deep link copied to clipboard (modern API)');
               alert('Deep link copied! You can paste and open it in your notes app.');
@@ -611,7 +620,6 @@ function getRedirectHTML(data, error, logs = []) {
               alert('Failed to copy. Please manually copy the deep link shown above.');
             });
           }
-          
           document.body.removeChild(textarea);
         }
 
@@ -626,28 +634,20 @@ function getRedirectHTML(data, error, logs = []) {
             hasData: hasData,
             timestamp: new Date().toISOString()
           };
-          
           addLog('Debug Info: ' + JSON.stringify(info, null, 2));
           alert('Debug info added to logs. Please scroll down to view.');
         }
 
-        // Auto-redirect on load with delays
         window.addEventListener('load', () => {
           addLog('Window loaded');
-          
           if (hasData) {
             addLog('Auto-redirect will start in 1 second...');
-            
             setTimeout(() => {
               addLog('Starting auto-redirect sequence');
               tryRedirect('location');
             }, 1000);
-            
-            // Fallback methods
             setTimeout(() => tryRedirect('iframe'), 2500);
             setTimeout(() => tryRedirect('anchor'), 4000);
-            
-            // For Android
             if (/android/i.test(navigator.userAgent)) {
               setTimeout(() => tryRedirect('intent'), 5500);
             }
@@ -656,12 +656,10 @@ function getRedirectHTML(data, error, logs = []) {
           }
         });
 
-        // Log any JavaScript errors
         window.addEventListener('error', (e) => {
           addLog('❌ JS Error: ' + e.message + ' at ' + e.filename + ':' + e.lineno);
         });
 
-        // Log when page becomes visible/hidden
         document.addEventListener('visibilitychange', () => {
           addLog('Page visibility: ' + (document.hidden ? 'hidden' : 'visible'));
         });
@@ -682,32 +680,30 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     
     logs.push({ 
       timestamp: new Date().toISOString(), 
-      message: `Code present: ${!!code}, Verifier present: ${!!codeVerifier}, Error: ${googleError || 'none'}` 
+      message: `Code: ${!!code}, Verifier: ${!!codeVerifier}, Google Error: ${googleError || 'none'}` 
     });
     
-    console.log('[Auth Callback] Received callback:', {
+    console.log('[Auth Callback] Received:', {
       hasCode: !!code,
       hasVerifier: !!codeVerifier,
-      error: googleError || 'none',
-      query: req.query
+      error: googleError || 'none'
     });
     
     if (googleError) {
-      console.error('[Auth Callback] Google returned error:', googleError);
+      console.error('[Auth Callback] Google error:', googleError);
       logs.push({ timestamp: new Date().toISOString(), message: `Google error: ${googleError}` });
       return res.send(getRedirectHTML(null, googleError, logs));
     }
     
     if (!code || !codeVerifier) {
-      console.error('[Auth Callback] Missing required parameters');
+      console.error('[Auth Callback] Missing parameters');
       logs.push({ timestamp: new Date().toISOString(), message: 'Missing code or verifier' });
       return res.send(getRedirectHTML(null, 'Missing authentication parameters', logs));
     }
     
     const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
-    logs.push({ timestamp: new Date().toISOString(), message: `Exchanging code for tokens...` });
+    logs.push({ timestamp: new Date().toISOString(), message: 'Exchanging code for tokens...' });
     
-    // Exchange code for tokens
     const { tokens } = await googleOAuthClient.getToken({
       code,
       codeVerifier,
@@ -716,20 +712,16 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     
     logs.push({ 
       timestamp: new Date().toISOString(), 
-      message: `Token exchange result - Access token: ${!!tokens.access_token}, ID token: ${!!tokens.id_token}` 
+      message: `Tokens received - Access: ${!!tokens.access_token}` 
     });
     
-    console.log('[Auth Callback] Token exchange result:', {
-      hasAccessToken: !!tokens.access_token,
-      hasIdToken: !!tokens.id_token
-    });
+    console.log('[Auth Callback] Tokens:', { hasAccessToken: !!tokens.access_token });
     
     if (!tokens.access_token) {
-      logs.push({ timestamp: new Date().toISOString(), message: 'Failed to obtain access token' });
-      return res.send(getRedirectHTML(null, 'Failed to obtain access token from Google', logs));
+      logs.push({ timestamp: new Date().toISOString(), message: 'No access token received' });
+      return res.send(getRedirectHTML(null, 'Failed to obtain access token', logs));
     }
     
-    // Fetch user info from Google
     logs.push({ timestamp: new Date().toISOString(), message: 'Fetching user info from Google...' });
     
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
@@ -739,16 +731,11 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     
     logs.push({ 
       timestamp: new Date().toISOString(), 
-      message: `User info received - Email: ${googleUser.email}, Name: ${googleUser.name}` 
+      message: `User: ${googleUser.email}` 
     });
     
-    console.log('[Auth Callback] User info:', { 
-      email: googleUser.email, 
-      name: googleUser.name,
-      sub: googleUser.sub 
-    });
+    console.log('[Auth Callback] User:', { email: googleUser.email });
     
-    // Find or create user in database
     logs.push({ timestamp: new Date().toISOString(), message: 'Looking up user in database...' });
     
     let user = await User.findOne({ email: googleUser.email });
@@ -764,18 +751,17 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
         verification: { isVerified: false },
         ageVerified: false,
       });
-      logs.push({ timestamp: new Date().toISOString(), message: `New user created with ID: ${user._id}` });
+      logs.push({ timestamp: new Date().toISOString(), message: `User created: ${user._id}` });
     } else {
-      logs.push({ timestamp: new Date().toISOString(), message: `Existing user found with ID: ${user._id}` });
+      logs.push({ timestamp: new Date().toISOString(), message: `User found: ${user._id}` });
       if (!user.googleId) {
         user.googleId = googleUser.sub;
         await user.save();
-        logs.push({ timestamp: new Date().toISOString(), message: 'Updated Google ID for existing user' });
+        logs.push({ timestamp: new Date().toISOString(), message: 'Updated Google ID' });
       }
     }
     
-    // Generate JWT token for the app
-    const jwt = require('jsonwebtoken');
+    // Generate JWT token
     const appToken = jwt.sign(
       { userId: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET || 'agriagent-secret-key',
@@ -784,12 +770,11 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     
     logs.push({ 
       timestamp: new Date().toISOString(), 
-      message: `Generated app token for user. Redirecting to app...` 
+      message: '✅ JWT token generated, sending redirect page' 
     });
     
-    console.log('[Auth Callback] ✅ Authentication successful, sending HTML redirect page');
+    console.log('[Auth Callback] ✅ Success, sending HTML page');
     
-    // Send HTML page that will redirect to the app
     res.send(getRedirectHTML({
       token: appToken,
       userId: user._id,
