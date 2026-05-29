@@ -372,8 +372,11 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       return res.status(400).send('Missing code or verifier');
     }
     const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
-    googleOAuthClient.redirectUri = redirectUri;
-    const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier });
+    const { tokens } = await googleOAuthClient.getToken({
+      code,
+      codeVerifier,
+      redirect_uri: redirectUri
+    });
     if (!tokens.access_token) {
       return res.status(400).send('Failed to obtain access token');
     }
@@ -394,7 +397,6 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       user.googleId = googleUser.sub;
       await user.save();
     }
-    // Deep link back to app with token
     const deepLink = `agriagent://auth?token=${tokens.access_token}&role=${user.role}`;
     res.redirect(deepLink);
   } catch (error) {
@@ -402,7 +404,6 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     res.status(500).send('Authentication failed: ' + error.message);
   }
 });
-
 // ==================== GOOGLE AUTH — PKCE MOBILE FLOW ====================
 /**
  * Receives the authorization code + PKCE verifier from the mobile app.
