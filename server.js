@@ -4,11 +4,11 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
-const { OAuth2Client } = require('google-auth-library'); // npm install google-auth-library
+const { OAuth2Client } = require('google-auth-library');
 require('dotenv').config();
 
 const app = express();
-app.set('trust proxy', 1); // Trust Koyeb's load balancer (fixes express-rate-limit X-Forwarded-For warning)
+app.set('trust proxy', 1); // Trust Koyeb's load balancer
 
 // ==================== DATABASE CONNECTION ====================
 const connectDB = async () => {
@@ -45,8 +45,6 @@ if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
 }
 
 // ==================== GOOGLE OAUTH CLIENT ====================
-// Used by the new PKCE mobile auth flow to exchange auth codes for tokens.
-// Required env vars: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
 const googleOAuthClient = new OAuth2Client(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET
@@ -70,8 +68,8 @@ app.use('/api/', limiter);
 
 // ==================== MODELS ====================
 const userSchema = new mongoose.Schema({
-  firebaseUid: { type: String, unique: true, sparse: true }, // sparse: allows null for non-Firebase users
-  googleId:    { type: String, unique: true, sparse: true }, // set for PKCE-auth users
+  firebaseUid: { type: String, unique: true, sparse: true },
+  googleId:    { type: String, unique: true, sparse: true },
   email: { type: String, required: true, unique: true },
   role: { type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'], default: 'farmer' },
   ageVerified: { type: Boolean, default: false },
@@ -213,18 +211,6 @@ const Booking   = mongoose.model('Booking',   bookingSchema);
 const Report    = mongoose.model('Report',    reportSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
-/**
- * Supports two token types:
- *
- *   1. Firebase ID token  — issued by Firebase Auth (legacy / web flow).
- *      Verified via firebaseAdmin.auth().verifyIdToken().
- *
- *   2. Google access token — issued by the new PKCE mobile flow.
- *      Verified by calling Google's tokeninfo endpoint.
- *      Prefixed with "google_" so middleware can distinguish the two.
- *
- * Both paths upsert a User document and attach it to req.user.
- */
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -234,16 +220,15 @@ const authenticate = async (req, res, next) => {
 
     const rawToken = authHeader.split(' ')[1];
 
-    // ── Dev shortcut (no Firebase, no Google) ──────────────────────────────
+    // Dev shortcut
     if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
       req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer' };
       return next();
     }
 
-    // ── PKCE / Google access token (prefixed by our mobile client) ─────────
+    // PKCE / Google access token
     if (rawToken.startsWith('google_')) {
-      const accessToken = rawToken.slice(7); // strip "google_" prefix
-
+      const accessToken = rawToken.slice(7);
       const tokenInfoRes = await fetch(
         `https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`
       );
@@ -253,7 +238,6 @@ const authenticate = async (req, res, next) => {
         return res.status(401).json({ error: 'Invalid Google access token' });
       }
 
-      // Upsert user by email
       let user = await User.findOne({ email: tokenInfo.email });
       if (!user) {
         return res.status(401).json({ error: 'User not found. Please sign in first.' });
@@ -266,7 +250,7 @@ const authenticate = async (req, res, next) => {
       return next();
     }
 
-    // ── Firebase ID token (existing flow) ─────────────────────────────────
+    // Firebase ID token
     if (!firebaseAdmin) {
       return res.status(401).json({ error: 'Auth service not configured' });
     }
@@ -330,7 +314,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// ==================== GOOGLE AUTH — LEGACY (web / Firebase flow) ====================
+// ==================== GOOGLE AUTH — LEGACY ====================
 app.post('/api/auth/google', async (req, res) => {
   try {
     const { email, name, picture, googleId } = req.body;
@@ -364,32 +348,44 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-// ==================== GOOGLE AUTH — CALLBACK (redirect flow) ====================
+// ==================== GOOGLE AUTH — CALLBACK (FIXED FOR KOYEB) ====================
 app.get('/api/auth/google-mobile/callback', async (req, res) => {
   try {
     const { code, state: codeVerifier } = req.query;
+    
     if (!code || !codeVerifier) {
       return res.status(400).send('Missing code or verifier');
     }
+    
     const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
+    
+    // Exchange code for tokens
     const { tokens } = await googleOAuthClient.getToken({
       code,
       codeVerifier,
       redirect_uri: redirectUri
     });
+    
     if (!tokens.access_token) {
       return res.status(400).send('Failed to obtain access token');
     }
+    
+    // Fetch user info from Google
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
     const googleUser = await userInfoRes.json();
+    
+    // Find or create user in database
     let user = await User.findOne({ email: googleUser.email });
     if (!user) {
       user = await User.create({
         googleId: googleUser.sub,
         email: googleUser.email,
-        profile: { name: googleUser.name, profileImage: googleUser.picture },
+        profile: { 
+          name: googleUser.name, 
+          profileImage: googleUser.picture 
+        },
         verification: { isVerified: false },
         ageVerified: false,
       });
@@ -397,28 +393,73 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       user.googleId = googleUser.sub;
       await user.save();
     }
-    const deepLink = `agriagent://auth?token=${tokens.access_token}&role=${user.role}`;
-    res.redirect(deepLink);
+    
+    // Create a session token
+    const sessionToken = tokens.access_token;
+    
+    // Redirect back to the app with the token
+    const appDeepLink = `agriagent://auth?token=${sessionToken}&userId=${user._id}&email=${user.email}&role=${user.role}`;
+    
+    console.log('[Auth] Redirecting to app:', appDeepLink);
+    
+    // Redirect to the app
+    res.redirect(appDeepLink);
+    
   } catch (error) {
     console.error('Callback error:', error);
-    res.status(500).send('Authentication failed: ' + error.message);
+    res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Authentication Failed</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+          }
+          .container {
+            text-align: center;
+            padding: 20px;
+          }
+          .error {
+            font-size: 48px;
+            margin-bottom: 20px;
+          }
+          button {
+            background: white;
+            color: #764ba2;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-top: 20px;
+          }
+          button:hover {
+            transform: scale(1.05);
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="error">❌</div>
+          <h1>Authentication Failed</h1>
+          <p>${error.message}</p>
+          <button onclick="window.close()">Close Window</button>
+        </div>
+      </body>
+      </html>
+    `);
   }
 });
+
 // ==================== GOOGLE AUTH — PKCE MOBILE FLOW ====================
-/**
- * Receives the authorization code + PKCE verifier from the mobile app.
- * Exchanges them for tokens server-side (keeps GOOGLE_CLIENT_SECRET off the device).
- *
- * Request body:
- *   { code: string, codeVerifier: string, redirectUri: string }
- *
- * Response:
- *   { success: true, idToken: string, user: { id, email, role, profile, verification, ageVerified } }
- *
- * The mobile app stores `idToken` (Google access token) and prefixes it with
- * "google_" when calling authenticated endpoints so the middleware can route it
- * correctly.
- */
 app.post('/api/auth/google-mobile', async (req, res) => {
   try {
     const { code, codeVerifier, redirectUri } = req.body;
@@ -427,7 +468,6 @@ app.post('/api/auth/google-mobile', async (req, res) => {
       return res.status(400).json({ error: 'code, codeVerifier, and redirectUri are required' });
     }
 
-    // Exchange auth code for tokens using PKCE verifier
     googleOAuthClient.redirectUri = redirectUri;
     const { tokens } = await googleOAuthClient.getToken({
       code,
@@ -438,7 +478,6 @@ app.post('/api/auth/google-mobile', async (req, res) => {
       return res.status(400).json({ error: 'Failed to obtain access token from Google' });
     }
 
-    // Fetch the user's Google profile
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
@@ -448,9 +487,7 @@ app.post('/api/auth/google-mobile', async (req, res) => {
     }
 
     const googleUser = await userInfoRes.json();
-    // googleUser: { sub, email, name, picture, email_verified }
 
-    // Upsert user in MongoDB
     let user = await User.findOne({ email: googleUser.email });
 
     if (!user) {
@@ -465,7 +502,6 @@ app.post('/api/auth/google-mobile', async (req, res) => {
         ageVerified: false,
       });
     } else {
-      // Backfill googleId if this user previously signed in via Firebase
       if (!user.googleId) {
         user.googleId = googleUser.sub;
         await user.save();
@@ -476,11 +512,9 @@ app.post('/api/auth/google-mobile', async (req, res) => {
       return res.status(401).json({ error: 'Account has been deactivated' });
     }
 
-    // Return the access token — mobile app will prefix it with "google_"
-    // when calling authenticated endpoints (see authenticate middleware above)
     res.json({
       success: true,
-      idToken: tokens.access_token, // stored as 'idToken' key to match existing AsyncStorage key
+      idToken: tokens.access_token,
       user: {
         id: user._id,
         email: user.email,
@@ -493,6 +527,28 @@ app.post('/api/auth/google-mobile', async (req, res) => {
   } catch (error) {
     console.error('PKCE token exchange error:', error);
     res.status(500).json({ error: error.message || 'Token exchange failed' });
+  }
+});
+
+// ==================== SESSION CHECK ENDPOINT ====================
+app.get('/api/auth/session', authenticate, async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1] || '';
+    
+    res.json({
+      success: true,
+      token: token,
+      user: {
+        id: req.user._id,
+        email: req.user.email,
+        role: req.user.role,
+        profile: req.user.profile,
+        verification: req.user.verification,
+        ageVerified: req.user.ageVerified
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -565,7 +621,7 @@ app.put('/api/auth/profile', authenticate, async (req, res) => {
   }
 });
 
-// ==================== USER MANAGEMENT (GDPR) ====================
+// ==================== USER MANAGEMENT ====================
 app.delete('/api/users/delete-account', authenticate, async (req, res) => {
   try {
     const userId = req.user._id;
