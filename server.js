@@ -35,23 +35,28 @@ if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       }),
     });
-    console.log('✅ Firebase Admin initialized');
+    console.log('✅ Firebase Admin initialized for project:', process.env.FIREBASE_PROJECT_ID);
   } catch (error) {
     console.error('❌ Firebase Admin error:', error.message);
   }
+} else {
+  console.warn('⚠️ Firebase Admin credentials missing. Running in demo mode.');
 }
 
 // ==================== MIDDLEWARE ====================
 app.use(helmet());
 app.use(cors({
-  origin: ['http://localhost:19000', 'http://localhost:19006', 'https://*.koyeb.app', 'exp://*'],
+  origin: ['http://localhost:19000', 'http://localhost:19006', 'https://*.koyeb.app', 'exp://*', '*'],
   credentials: true,
 }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
+  message: { error: 'Too many requests, please try again later.' },
 });
 app.use('/api/', limiter);
 
@@ -75,7 +80,13 @@ const userSchema = new mongoose.Schema({
   },
   verification: {
     isPhoneVerified: { type: Boolean, default: false },
+    isAadharVerified: { type: Boolean, default: false },
     isVerified: { type: Boolean, default: false },
+    verifiedAt: Date,
+    documents: {
+      aadharUrl: String,
+      panUrl: String,
+    },
   },
   labourerDetails: {
     age: Number,
@@ -181,13 +192,14 @@ const authenticate = async (req, res, next) => {
 
     const idToken = authHeader.split(' ')[1];
     
+    // Demo mode for testing without Firebase
+    if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
+      req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer' };
+      return next();
+    }
+    
     if (!firebaseAdmin) {
-      // Demo mode - accept any token for testing
-      if (process.env.NODE_ENV === 'development') {
-        req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer' };
-        return next();
-      }
-      return res.status(401).json({ error: 'Auth not configured' });
+      return res.status(401).json({ error: 'Auth service not configured' });
     }
 
     const decodedToken = await firebaseAdmin.auth().verifyIdToken(idToken);
@@ -214,28 +226,40 @@ const authenticate = async (req, res, next) => {
 
 // ==================== API ROUTES ====================
 
-// Health check
+// HEALTH CHECK - Improved for Koyeb
 app.get('/health', async (req, res) => {
+  const dbState = mongoose.connection.readyState;
+  const dbStatus = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting',
+  }[dbState] || 'unknown';
+  
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    uptime: process.uptime(),
+    mongodb: dbStatus,
     firebase: !!firebaseAdmin,
+    environment: process.env.NODE_ENV || 'production',
   });
 });
 
-// Root
+// Root endpoint
 app.get('/', (req, res) => {
   res.json({
     message: 'AgriAgent API is running',
     version: '1.0.0',
+    status: 'active',
     endpoints: {
-      auth: '/api/auth/me, /api/auth/role, /api/auth/profile',
-      equipment: '/api/equipment (GET, POST), /api/equipment/:id (GET, PUT, DELETE)',
-      produce: '/api/produce (GET, POST), /api/produce/:id (GET, PUT, DELETE)',
-      bookings: '/api/bookings (GET, POST), /api/bookings/:id (PUT)',
-      users: '/api/users/:id',
-      dashboard: '/api/dashboard/stats',
+      health: 'GET /health',
+      auth: 'GET /api/auth/me, PUT /api/auth/role, PUT /api/auth/profile',
+      equipment: 'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
+      produce: 'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
+      bookings: 'GET,POST /api/bookings, PUT /api/bookings/:id',
+      users: 'GET /api/users/:id',
+      dashboard: 'GET /api/dashboard/stats',
     },
   });
 });
@@ -295,7 +319,7 @@ app.put('/api/auth/profile', authenticate, async (req, res) => {
 // ==================== EQUIPMENT ROUTES ====================
 app.get('/api/equipment', async (req, res) => {
   try {
-    const { category, search, lat, lng, radius = 10 } = req.query;
+    const { category, search } = req.query;
     let query = { 'availability.isAvailable': true };
     
     if (category && category !== 'all') query.category = category;
@@ -306,7 +330,7 @@ app.get('/api/equipment', async (req, res) => {
       ];
     }
     
-    let equipment = await Equipment.find(query)
+    const equipment = await Equipment.find(query)
       .populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings')
       .sort('-createdAt')
       .limit(50);
@@ -504,12 +528,19 @@ app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.url} not found` });
 });
 
+// ==================== ERROR HANDLER ====================
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 5000;
 
 connectDB().then(() => {
-  app.listen(PORT, () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 Health check: http://localhost:${PORT}/health`);
+    console.log(`🔗 API base: http://localhost:${PORT}/`);
   });
 });
