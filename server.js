@@ -8,6 +8,7 @@ const { OAuth2Client } = require('google-auth-library'); // npm install google-a
 require('dotenv').config();
 
 const app = express();
+app.set('trust proxy', 1); // Trust Koyeb's load balancer (fixes express-rate-limit X-Forwarded-For warning)
 
 // ==================== DATABASE CONNECTION ====================
 const connectDB = async () => {
