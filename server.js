@@ -319,7 +319,7 @@ app.get('/', (req, res) => {
     status: 'active',
     endpoints: {
       health:    'GET /health',
-      auth:      'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/me, PUT /api/auth/role',
+      auth:      'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/google-mobile/callback, GET /api/auth/me, PUT /api/auth/role',
       equipment: 'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
       produce:   'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
       bookings:  'GET,POST /api/bookings, PUT /api/bookings/:id',
@@ -363,6 +363,45 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
+// ==================== GOOGLE AUTH — CALLBACK (redirect flow) ====================
+app.get('/api/auth/google-mobile/callback', async (req, res) => {
+  try {
+    const { code, state: codeVerifier } = req.query;
+    if (!code || !codeVerifier) {
+      return res.status(400).send('Missing code or verifier');
+    }
+    const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
+    googleOAuthClient.redirectUri = redirectUri;
+    const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier });
+    if (!tokens.access_token) {
+      return res.status(400).send('Failed to obtain access token');
+    }
+    const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    });
+    const googleUser = await userInfoRes.json();
+    let user = await User.findOne({ email: googleUser.email });
+    if (!user) {
+      user = await User.create({
+        googleId: googleUser.sub,
+        email: googleUser.email,
+        profile: { name: googleUser.name, profileImage: googleUser.picture },
+        verification: { isVerified: false },
+        ageVerified: false,
+      });
+    } else if (!user.googleId) {
+      user.googleId = googleUser.sub;
+      await user.save();
+    }
+    // Deep link back to app with token
+    const deepLink = `agriagent://auth?token=${tokens.access_token}&role=${user.role}`;
+    res.redirect(deepLink);
+  } catch (error) {
+    console.error('Callback error:', error);
+    res.status(500).send('Authentication failed: ' + error.message);
+  }
+});
+
 // ==================== GOOGLE AUTH — PKCE MOBILE FLOW ====================
 /**
  * Receives the authorization code + PKCE verifier from the mobile app.
@@ -378,55 +417,6 @@ app.post('/api/auth/google', async (req, res) => {
  * "google_" when calling authenticated endpoints so the middleware can route it
  * correctly.
  */
-
-// ==================== GOOGLE AUTH — CALLBACK (redirect flow) ====================
-app.get('/api/auth/google-mobile/callback', async (req, res) => {
-  try {
-    const { code, state: codeVerifier } = req.query;
-
-    if (!code || !codeVerifier) {
-      return res.status(400).send('Missing code or verifier');
-    }
-
-    const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
-
-    googleOAuthClient.redirectUri = redirectUri;
-    const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier });
-
-    if (!tokens.access_token) {
-      return res.status(400).send('Failed to obtain access token');
-    }
-
-    const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { Authorization: `Bearer ${tokens.access_token}` },
-    });
-    const googleUser = await userInfoRes.json();
-
-    let user = await User.findOne({ email: googleUser.email });
-    if (!user) {
-      user = await User.create({
-        googleId: googleUser.sub,
-        email: googleUser.email,
-        profile: { name: googleUser.name, profileImage: googleUser.picture },
-        verification: { isVerified: false },
-        ageVerified: false,
-      });
-    } else if (!user.googleId) {
-      user.googleId = googleUser.sub;
-      await user.save();
-    }
-
-    // Deep link back to app with token
-    const deepLink = `agriagent://auth?token=${tokens.access_token}&role=${user.role}`;
-    res.redirect(deepLink);
-
-  } catch (error) {
-    console.error('Callback error:', error);
-    res.status(500).send('Authentication failed: ' + error.message);
-  }
-});
-
-
 app.post('/api/auth/google-mobile', async (req, res) => {
   try {
     const { code, codeVerifier, redirectUri } = req.body;
