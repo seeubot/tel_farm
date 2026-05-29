@@ -1,7 +1,7 @@
 {
   "name": "agriagent-backend",
   "version": "1.0.0",
-  "description": "Backend API for AgriAgent Platform",
+  "description": "AgriAgent Backend API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,13 +12,9 @@
     "mongoose": "^8.0.0",
     "dotenv": "^16.3.1",
     "cors": "^2.8.5",
-    "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
     "firebase-admin": "^11.11.0",
-    "multer": "^1.4.5-lts.1",
-    "express-validator": "^7.0.1",
-    "helmet": "^7.0.0",
-    "express-rate-limit": "^7.1.5"
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
