@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
+const { OAuth2Client } = require('google-auth-library'); // npm install google-auth-library
 require('dotenv').config();
 
 const app = express();
@@ -27,7 +28,6 @@ if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
     if (privateKey.includes('\\n')) {
       privateKey = privateKey.replace(/\\n/g, '\n');
     }
-    
     firebaseAdmin = admin.initializeApp({
       credential: admin.credential.cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
@@ -40,8 +40,16 @@ if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
     console.error('❌ Firebase Admin error:', error.message);
   }
 } else {
-  console.warn('⚠️ Firebase Admin credentials missing. Running in demo mode.');
+  console.warn('⚠️  Firebase Admin credentials missing. Running in demo mode.');
 }
+
+// ==================== GOOGLE OAUTH CLIENT ====================
+// Used by the new PKCE mobile auth flow to exchange auth codes for tokens.
+// Required env vars: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+const googleOAuthClient = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET
+);
 
 // ==================== MIDDLEWARE ====================
 app.use(helmet());
@@ -52,7 +60,6 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -62,7 +69,8 @@ app.use('/api/', limiter);
 
 // ==================== MODELS ====================
 const userSchema = new mongoose.Schema({
-  firebaseUid: { type: String, required: true, unique: true },
+  firebaseUid: { type: String, unique: true, sparse: true }, // sparse: allows null for non-Firebase users
+  googleId:    { type: String, unique: true, sparse: true }, // set for PKCE-auth users
   email: { type: String, required: true, unique: true },
   role: { type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'], default: 'farmer' },
   ageVerified: { type: Boolean, default: false },
@@ -104,7 +112,7 @@ const userSchema = new mongoose.Schema({
   },
   ratings: {
     average: { type: Number, default: 0 },
-    count: { type: Number, default: 0 },
+    count:   { type: Number, default: 0 },
   },
   isActive: { type: Boolean, default: true },
   deletedAt: { type: Date },
@@ -116,90 +124,106 @@ const equipmentSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true },
   teluguName: { type: String },
-  category: { type: String, enum: ['Tractor', 'Harvester', 'Irrigation Pump', 'Power Tiller', 'Sprayer', 'Processing Machine', 'Trailer', 'Other'], required: true },
+  category: {
+    type: String,
+    enum: ['Tractor', 'Harvester', 'Irrigation Pump', 'Power Tiller', 'Sprayer', 'Processing Machine', 'Trailer', 'Other'],
+    required: true,
+  },
   description: { type: String },
   pricing: {
-    perDay: { type: Number, required: true },
-    perHour: { type: Number },
-    deposit: { type: Number, required: true },
+    perDay:   { type: Number, required: true },
+    perHour:  { type: Number },
+    deposit:  { type: Number, required: true },
   },
   location: {
-    lat: { type: Number, required: true },
-    lng: { type: Number, required: true },
-    address: String,
-    village: String,
+    lat:      { type: Number, required: true },
+    lng:      { type: Number, required: true },
+    address:  String,
+    village:  String,
     district: String,
   },
   features: [String],
   images: [String],
   availability: {
-    isAvailable: { type: Boolean, default: true },
+    isAvailable:   { type: Boolean, default: true },
     availableFrom: Date,
-    availableTo: Date,
+    availableTo:   Date,
   },
-  ratings: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
-  isVerified: { type: Boolean, default: false },
+  ratings:      { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
+  isVerified:   { type: Boolean, default: false },
   totalRentals: { type: Number, default: 0 },
-  isActive: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now },
+  isActive:     { type: Boolean, default: true },
+  createdAt:    { type: Date, default: Date.now },
 });
 
 const produceSchema = new mongoose.Schema({
-  farmerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  cropName: { type: String, required: true },
+  farmerId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  cropName:   { type: String, required: true },
   teluguName: { type: String },
-  variety: String,
-  quantity: { type: Number, required: true },
-  unit: { type: String, default: 'kg' },
-  price: { type: Number, required: true },
-  priceUnit: { type: String, default: 'per quintal' },
+  variety:    String,
+  quantity:   { type: Number, required: true },
+  unit:       { type: String, default: 'kg' },
+  price:      { type: Number, required: true },
+  priceUnit:  { type: String, default: 'per quintal' },
   location: {
-    lat: Number,
-    lng: Number,
+    lat:     Number,
+    lng:     Number,
     address: String,
     village: String,
   },
   description: String,
-  organic: { type: Boolean, default: false },
+  organic:     { type: Boolean, default: false },
   harvestDate: Date,
-  images: [String],
+  images:      [String],
   isAvailable: { type: Boolean, default: true },
-  isActive: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now },
+  isActive:    { type: Boolean, default: true },
+  createdAt:   { type: Date, default: Date.now },
 });
 
 const bookingSchema = new mongoose.Schema({
-  type: { type: String, enum: ['equipment', 'produce'], required: true },
-  itemId: { type: mongoose.Schema.Types.ObjectId, required: true },
-  renterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  startDate: Date,
-  endDate: Date,
-  quantity: Number,
+  type:        { type: String, enum: ['equipment', 'produce'], required: true },
+  itemId:      { type: mongoose.Schema.Types.ObjectId, required: true },
+  renterId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  ownerId:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  startDate:   Date,
+  endDate:     Date,
+  quantity:    Number,
   totalAmount: Number,
-  deposit: Number,
-  status: { type: String, enum: ['pending', 'confirmed', 'completed', 'cancelled'], default: 'pending' },
-  rentalType: { type: String, enum: ['self', 'withOperator'] },
-  createdAt: { type: Date, default: Date.now },
+  deposit:     Number,
+  status:      { type: String, enum: ['pending', 'confirmed', 'completed', 'cancelled'], default: 'pending' },
+  rentalType:  { type: String, enum: ['self', 'withOperator'] },
+  createdAt:   { type: Date, default: Date.now },
 });
 
 const reportSchema = new mongoose.Schema({
-  reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  type: { type: String, enum: ['user', 'equipment', 'produce'], required: true },
-  targetId: { type: mongoose.Schema.Types.ObjectId, required: true },
-  reason: { type: String, required: true },
+  reporterId:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  type:        { type: String, enum: ['user', 'equipment', 'produce'], required: true },
+  targetId:    { type: mongoose.Schema.Types.ObjectId, required: true },
+  reason:      { type: String, required: true },
   description: { type: String },
-  status: { type: String, enum: ['pending', 'reviewed', 'resolved'], default: 'pending' },
-  createdAt: { type: Date, default: Date.now },
+  status:      { type: String, enum: ['pending', 'reviewed', 'resolved'], default: 'pending' },
+  createdAt:   { type: Date, default: Date.now },
 });
 
-const User = mongoose.model('User', userSchema);
+const User      = mongoose.model('User',      userSchema);
 const Equipment = mongoose.model('Equipment', equipmentSchema);
-const Produce = mongoose.model('Produce', produceSchema);
-const Booking = mongoose.model('Booking', bookingSchema);
-const Report = mongoose.model('Report', reportSchema);
+const Produce   = mongoose.model('Produce',   produceSchema);
+const Booking   = mongoose.model('Booking',   bookingSchema);
+const Report    = mongoose.model('Report',    reportSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
+/**
+ * Supports two token types:
+ *
+ *   1. Firebase ID token  — issued by Firebase Auth (legacy / web flow).
+ *      Verified via firebaseAdmin.auth().verifyIdToken().
+ *
+ *   2. Google access token — issued by the new PKCE mobile flow.
+ *      Verified by calling Google's tokeninfo endpoint.
+ *      Prefixed with "google_" so middleware can distinguish the two.
+ *
+ * Both paths upsert a User document and attach it to req.user.
+ */
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -207,20 +231,48 @@ const authenticate = async (req, res, next) => {
       return res.status(401).json({ error: 'No token provided' });
     }
 
-    const idToken = authHeader.split(' ')[1];
-    
+    const rawToken = authHeader.split(' ')[1];
+
+    // ── Dev shortcut (no Firebase, no Google) ──────────────────────────────
     if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
       req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer' };
       return next();
     }
-    
+
+    // ── PKCE / Google access token (prefixed by our mobile client) ─────────
+    if (rawToken.startsWith('google_')) {
+      const accessToken = rawToken.slice(7); // strip "google_" prefix
+
+      const tokenInfoRes = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`
+      );
+      const tokenInfo = await tokenInfoRes.json();
+
+      if (!tokenInfoRes.ok || tokenInfo.error) {
+        return res.status(401).json({ error: 'Invalid Google access token' });
+      }
+
+      // Upsert user by email
+      let user = await User.findOne({ email: tokenInfo.email });
+      if (!user) {
+        return res.status(401).json({ error: 'User not found. Please sign in first.' });
+      }
+      if (!user.isActive) {
+        return res.status(401).json({ error: 'Account has been deactivated' });
+      }
+
+      req.user = user;
+      return next();
+    }
+
+    // ── Firebase ID token (existing flow) ─────────────────────────────────
     if (!firebaseAdmin) {
       return res.status(401).json({ error: 'Auth service not configured' });
     }
 
-    const decodedToken = await firebaseAdmin.auth().verifyIdToken(idToken);
+    const decodedToken = await firebaseAdmin.auth().verifyIdToken(rawToken);
     let user = await User.findOne({ firebaseUid: decodedToken.uid });
-    
+
     if (!user) {
       user = await User.create({
         firebaseUid: decodedToken.uid,
@@ -231,7 +283,7 @@ const authenticate = async (req, res, next) => {
         },
       });
     }
-    
+
     if (!user.isActive) {
       return res.status(401).json({ error: 'Account has been deactivated' });
     }
@@ -246,14 +298,10 @@ const authenticate = async (req, res, next) => {
 
 // ==================== HEALTH CHECK ====================
 app.get('/health', async (req, res) => {
-  const dbState = mongoose.connection.readyState;
   const dbStatus = {
-    0: 'disconnected',
-    1: 'connected',
-    2: 'connecting',
-    3: 'disconnecting',
-  }[dbState] || 'unknown';
-  
+    0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting',
+  }[mongoose.connection.readyState] || 'unknown';
+
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
@@ -264,44 +312,40 @@ app.get('/health', async (req, res) => {
   });
 });
 
-// Root endpoint
 app.get('/', (req, res) => {
   res.json({
     message: 'AgriAgent API is running',
     version: '1.0.0',
     status: 'active',
     endpoints: {
-      health: 'GET /health',
-      auth: 'POST /api/auth/google, GET /api/auth/me, PUT /api/auth/role',
+      health:    'GET /health',
+      auth:      'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/me, PUT /api/auth/role',
       equipment: 'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
-      produce: 'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
-      bookings: 'GET,POST /api/bookings, PUT /api/bookings/:id',
-      users: 'DELETE /api/users/delete-account, GET /api/users/export-data',
-      reports: 'POST /api/reports',
+      produce:   'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
+      bookings:  'GET,POST /api/bookings, PUT /api/bookings/:id',
+      users:     'DELETE /api/users/delete-account, GET /api/users/export-data',
+      reports:   'POST /api/reports',
     },
   });
 });
 
-// ==================== GOOGLE AUTH ROUTE ====================
+// ==================== GOOGLE AUTH — LEGACY (web / Firebase flow) ====================
 app.post('/api/auth/google', async (req, res) => {
   try {
     const { email, name, picture, googleId } = req.body;
-    
+
     let user = await User.findOne({ email });
-    
+
     if (!user) {
       user = await User.create({
         firebaseUid: googleId,
-        email: email,
-        profile: {
-          name: name,
-          profileImage: picture,
-        },
+        email,
+        profile: { name, profileImage: picture },
         verification: { isVerified: false },
         ageVerified: false,
       });
     }
-    
+
     res.json({
       success: true,
       user: {
@@ -319,19 +363,108 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
+// ==================== GOOGLE AUTH — PKCE MOBILE FLOW ====================
+/**
+ * Receives the authorization code + PKCE verifier from the mobile app.
+ * Exchanges them for tokens server-side (keeps GOOGLE_CLIENT_SECRET off the device).
+ *
+ * Request body:
+ *   { code: string, codeVerifier: string, redirectUri: string }
+ *
+ * Response:
+ *   { success: true, idToken: string, user: { id, email, role, profile, verification, ageVerified } }
+ *
+ * The mobile app stores `idToken` (Google access token) and prefixes it with
+ * "google_" when calling authenticated endpoints so the middleware can route it
+ * correctly.
+ */
+app.post('/api/auth/google-mobile', async (req, res) => {
+  try {
+    const { code, codeVerifier, redirectUri } = req.body;
+
+    if (!code || !codeVerifier || !redirectUri) {
+      return res.status(400).json({ error: 'code, codeVerifier, and redirectUri are required' });
+    }
+
+    // Exchange auth code for tokens using PKCE verifier
+    googleOAuthClient.redirectUri = redirectUri;
+    const { tokens } = await googleOAuthClient.getToken({
+      code,
+      codeVerifier,
+    });
+
+    if (!tokens.access_token) {
+      return res.status(400).json({ error: 'Failed to obtain access token from Google' });
+    }
+
+    // Fetch the user's Google profile
+    const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    });
+
+    if (!userInfoRes.ok) {
+      return res.status(400).json({ error: 'Failed to fetch Google user info' });
+    }
+
+    const googleUser = await userInfoRes.json();
+    // googleUser: { sub, email, name, picture, email_verified }
+
+    // Upsert user in MongoDB
+    let user = await User.findOne({ email: googleUser.email });
+
+    if (!user) {
+      user = await User.create({
+        googleId: googleUser.sub,
+        email: googleUser.email,
+        profile: {
+          name: googleUser.name,
+          profileImage: googleUser.picture,
+        },
+        verification: { isVerified: false },
+        ageVerified: false,
+      });
+    } else {
+      // Backfill googleId if this user previously signed in via Firebase
+      if (!user.googleId) {
+        user.googleId = googleUser.sub;
+        await user.save();
+      }
+    }
+
+    if (!user.isActive) {
+      return res.status(401).json({ error: 'Account has been deactivated' });
+    }
+
+    // Return the access token — mobile app will prefix it with "google_"
+    // when calling authenticated endpoints (see authenticate middleware above)
+    res.json({
+      success: true,
+      idToken: tokens.access_token, // stored as 'idToken' key to match existing AsyncStorage key
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        profile: user.profile,
+        verification: user.verification,
+        ageVerified: user.ageVerified,
+      },
+    });
+  } catch (error) {
+    console.error('PKCE token exchange error:', error);
+    res.status(500).json({ error: error.message || 'Token exchange failed' });
+  }
+});
+
 // ==================== AGE VERIFICATION ====================
 app.post('/api/auth/verify-age', authenticate, async (req, res) => {
   try {
     const { age } = req.body;
-    
     if (age < 18) {
       return res.status(400).json({ error: 'You must be 18 years or older to use AgriAgent' });
     }
-    
     req.user.ageVerified = true;
     req.user.age = age;
     await req.user.save();
-    
     res.json({ success: true, message: 'Age verified successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -377,12 +510,12 @@ app.put('/api/auth/role', authenticate, async (req, res) => {
 app.put('/api/auth/profile', authenticate, async (req, res) => {
   try {
     const { name, teluguName, phone, location, labourerDetails, contractorDetails } = req.body;
-    if (name) req.user.profile.name = name;
-    if (teluguName) req.user.profile.teluguName = teluguName;
-    if (phone) req.user.profile.phone = phone;
-    if (location) req.user.profile.location = location;
-    if (labourerDetails) req.user.labourerDetails = labourerDetails;
-    if (contractorDetails) req.user.contractorDetails = contractorDetails;
+    if (name)               req.user.profile.name = name;
+    if (teluguName)         req.user.profile.teluguName = teluguName;
+    if (phone)              req.user.profile.phone = phone;
+    if (location)           req.user.profile.location = location;
+    if (labourerDetails)    req.user.labourerDetails = labourerDetails;
+    if (contractorDetails)  req.user.contractorDetails = contractorDetails;
     req.user.updatedAt = Date.now();
     await req.user.save();
     res.json({ success: true, user: req.user });
@@ -391,37 +524,22 @@ app.put('/api/auth/profile', authenticate, async (req, res) => {
   }
 });
 
-// ==================== USER MANAGEMENT (GDPR Compliant) ====================
-
-// Delete user account - GDPR Right to Erasure
+// ==================== USER MANAGEMENT (GDPR) ====================
 app.delete('/api/users/delete-account', authenticate, async (req, res) => {
   try {
     const userId = req.user._id;
-    
-    // Soft delete - mark as inactive and set deletion date
-    await User.findByIdAndUpdate(userId, { 
-      isActive: false, 
+    await User.findByIdAndUpdate(userId, {
+      isActive: false,
       deletedAt: new Date(),
       'profile.name': '[Deleted User]',
       'profile.phone': null,
     });
-    
-    // Delete user's listings (hard delete for privacy)
     await Equipment.deleteMany({ ownerId: userId });
     await Produce.deleteMany({ farmerId: userId });
-    
-    // Anonymize bookings
     await Booking.updateMany(
       { $or: [{ renterId: userId }, { ownerId: userId }] },
-      { 
-        $set: { 
-          renterId: null, 
-          ownerId: null,
-          totalAmount: 0,
-        } 
-      }
+      { $set: { renterId: null, ownerId: null, totalAmount: 0 } }
     );
-    
     res.json({ success: true, message: 'Account permanently deleted' });
   } catch (error) {
     console.error('Delete account error:', error);
@@ -429,26 +547,15 @@ app.delete('/api/users/delete-account', authenticate, async (req, res) => {
   }
 });
 
-// Export user data - GDPR Right to Access
 app.get('/api/users/export-data', authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('-__v');
+    const user      = await User.findById(req.user._id).select('-__v');
     const equipment = await Equipment.find({ ownerId: req.user._id });
-    const produce = await Produce.find({ farmerId: req.user._id });
-    const bookings = await Booking.find({ 
-      $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] 
+    const produce   = await Produce.find({ farmerId: req.user._id });
+    const bookings  = await Booking.find({
+      $or: [{ renterId: req.user._id }, { ownerId: req.user._id }],
     });
-    
-    res.json({
-      success: true,
-      exportedAt: new Date(),
-      data: {
-        user,
-        equipment,
-        produce,
-        bookings,
-      },
-    });
+    res.json({ success: true, exportedAt: new Date(), data: { user, equipment, produce, bookings } });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -458,11 +565,9 @@ app.get('/api/users/export-data', authenticate, async (req, res) => {
 app.post('/api/reports', authenticate, async (req, res) => {
   try {
     const { type, targetId, reason, description } = req.body;
-    
     if (!['user', 'equipment', 'produce'].includes(type)) {
       return res.status(400).json({ error: 'Invalid report type' });
     }
-    
     const report = await Report.create({
       reporterId: req.user._id,
       type,
@@ -470,11 +575,9 @@ app.post('/api/reports', authenticate, async (req, res) => {
       reason,
       description,
     });
-    
-    console.log(`📢 New report created: ${type}/${targetId} by ${req.user.email}`);
-    
-    res.json({ 
-      success: true, 
+    console.log(`📢 New report: ${type}/${targetId} by ${req.user.email}`);
+    res.json({
+      success: true,
       message: 'Report submitted successfully. We will review within 24 hours.',
       reportId: report._id,
     });
@@ -488,21 +591,18 @@ app.post('/api/reports', authenticate, async (req, res) => {
 app.get('/api/equipment', async (req, res) => {
   try {
     const { category, search } = req.query;
-    let query = { 'availability.isAvailable': true, isActive: true };
-    
+    const query = { 'availability.isAvailable': true, isActive: true };
     if (category && category !== 'all') query.category = category;
     if (search) {
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
+        { name:       { $regex: search, $options: 'i' } },
         { teluguName: { $regex: search, $options: 'i' } },
       ];
     }
-    
     const equipment = await Equipment.find(query)
       .populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings')
       .sort('-createdAt')
       .limit(50);
-    
     res.json({ success: true, equipment });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -562,22 +662,19 @@ app.delete('/api/equipment/:id', authenticate, async (req, res) => {
 app.get('/api/produce', async (req, res) => {
   try {
     const { crop, search, organic } = req.query;
-    let query = { isAvailable: true, isActive: true };
-    
+    const query = { isAvailable: true, isActive: true };
     if (crop && crop !== 'all') query.cropName = crop;
     if (search) {
       query.$or = [
         { cropName: { $regex: search, $options: 'i' } },
-        { variety: { $regex: search, $options: 'i' } },
+        { variety:  { $regex: search, $options: 'i' } },
       ];
     }
     if (organic === 'true') query.organic = true;
-    
     const produce = await Produce.find(query)
       .populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings')
       .sort('-createdAt')
       .limit(50);
-    
     res.json({ success: true, produce });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -637,7 +734,7 @@ app.delete('/api/produce/:id', authenticate, async (req, res) => {
 app.get('/api/bookings', authenticate, async (req, res) => {
   try {
     const bookings = await Booking.find({
-      $or: [{ renterId: req.user._id }, { ownerId: req.user._id }]
+      $or: [{ renterId: req.user._id }, { ownerId: req.user._id }],
     }).sort('-createdAt');
     res.json({ success: true, bookings });
   } catch (error) {
@@ -672,18 +769,19 @@ app.put('/api/bookings/:id', authenticate, async (req, res) => {
 // ==================== DASHBOARD STATS ====================
 app.get('/api/dashboard/stats', authenticate, async (req, res) => {
   try {
-    const equipmentCount = await Equipment.countDocuments({ ownerId: req.user._id });
-    const produceCount = await Produce.countDocuments({ farmerId: req.user._id });
-    const bookingsAsRenter = await Booking.countDocuments({ renterId: req.user._id });
-    const bookingsAsOwner = await Booking.countDocuments({ ownerId: req.user._id });
-    
+    const [equipmentCount, produceCount, bookingsAsRenter, bookingsAsOwner] = await Promise.all([
+      Equipment.countDocuments({ ownerId: req.user._id }),
+      Produce.countDocuments({ farmerId: req.user._id }),
+      Booking.countDocuments({ renterId: req.user._id }),
+      Booking.countDocuments({ ownerId: req.user._id }),
+    ]);
     res.json({
       success: true,
       stats: {
-        equipmentListed: equipmentCount,
-        produceListed: produceCount,
-        bookingsMade: bookingsAsRenter,
-        bookingsReceived: bookingsAsOwner,
+        equipmentListed:   equipmentCount,
+        produceListed:     produceCount,
+        bookingsMade:      bookingsAsRenter,
+        bookingsReceived:  bookingsAsOwner,
       },
     });
   } catch (error) {
@@ -691,12 +789,11 @@ app.get('/api/dashboard/stats', authenticate, async (req, res) => {
   }
 });
 
-// ==================== 404 HANDLER ====================
+// ==================== 404 / ERROR HANDLERS ====================
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.url} not found` });
 });
 
-// ==================== ERROR HANDLER ====================
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({ error: 'Internal server error' });
@@ -709,6 +806,5 @@ connectDB().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 Health check: http://localhost:${PORT}/health`);
-    console.log(`🔗 API base: http://localhost:${PORT}/`);
   });
 });
