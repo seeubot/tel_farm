@@ -348,7 +348,7 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-// ==================== GOOGLE AUTH — CALLBACK (FIXED FOR KOYEB) ====================
+// ==================== GOOGLE AUTH — CALLBACK (Redirects to Koyeb Success Page) ====================
 app.get('/api/auth/google-mobile/callback', async (req, res) => {
   try {
     const { code, state: codeVerifier } = req.query;
@@ -394,16 +394,151 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       await user.save();
     }
     
-    // Create a session token
-    const sessionToken = tokens.access_token;
+    // Store the token in a temporary session (you can use Redis or a simple in-memory store)
+    // For simplicity, we'll return it in a JSON response that the WebBrowser can capture
     
-    // Redirect back to the app with the token
-    const appDeepLink = `agriagent://auth?token=${sessionToken}&userId=${user._id}&email=${user.email}&role=${user.role}`;
+    // Return HTML page that displays success and sends data back to app
+    const htmlResponse = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Authentication Successful</title>
+        <style>
+          * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+          }
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+          }
+          .container {
+            text-align: center;
+            padding: 2rem;
+            animation: fadeIn 0.5s ease-in;
+          }
+          @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          .success-icon {
+            font-size: 80px;
+            margin-bottom: 20px;
+            animation: bounce 0.5s ease;
+          }
+          @keyframes bounce {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.2); }
+          }
+          h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            font-weight: 600;
+          }
+          p {
+            font-size: 16px;
+            margin-bottom: 30px;
+            opacity: 0.9;
+          }
+          .user-info {
+            background: rgba(255,255,255,0.2);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px auto;
+            max-width: 300px;
+            backdrop-filter: blur(10px);
+          }
+          .user-email {
+            font-size: 14px;
+            word-break: break-all;
+          }
+          .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+            margin-top: 20px;
+          }
+          @keyframes spin {
+            to { transform: rotate(360deg); }
+          }
+          .close-button {
+            background: white;
+            color: #764ba2;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            margin-top: 20px;
+            cursor: pointer;
+            transition: transform 0.2s;
+          }
+          .close-button:hover {
+            transform: scale(1.05);
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="success-icon">✅</div>
+          <h1>Authentication Successful!</h1>
+          <p>You have successfully signed in to AgriAgent</p>
+          <div class="user-info">
+            <div style="font-weight: bold; margin-bottom: 5px;">Welcome</div>
+            <div class="user-email">${googleUser.email}</div>
+          </div>
+          <div class="loading-spinner"></div>
+          <p style="font-size: 14px; margin-top: 20px;">Returning you to the app...</p>
+          <button class="close-button" onclick="closeWindow()">Close Window</button>
+        </div>
+        
+        <script>
+          // Store the authentication data
+          const authData = {
+            token: '${tokens.access_token}',
+            user: {
+              id: '${user._id}',
+              email: '${user.email}',
+              role: '${user.role}',
+              name: '${user.profile.name}',
+              profileImage: '${user.profile.profileImage || ''}'
+            }
+          };
+          
+          // Try to send data back to React Native app via WebBrowser
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(JSON.stringify(authData));
+          }
+          
+          // Store in localStorage for web platforms
+          localStorage.setItem('agriagent_auth', JSON.stringify(authData));
+          
+          function closeWindow() {
+            window.close();
+          }
+          
+          // Auto close after 3 seconds
+          setTimeout(() => {
+            closeWindow();
+          }, 3000);
+        </script>
+      </body>
+      </html>
+    `;
     
-    console.log('[Auth] Redirecting to app:', appDeepLink);
-    
-    // Redirect to the app
-    res.redirect(appDeepLink);
+    res.send(htmlResponse);
     
   } catch (error) {
     console.error('Callback error:', error);
@@ -427,8 +562,8 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
             text-align: center;
             padding: 20px;
           }
-          .error {
-            font-size: 48px;
+          .error-icon {
+            font-size: 80px;
             margin-bottom: 20px;
           }
           button {
@@ -441,14 +576,11 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
             cursor: pointer;
             margin-top: 20px;
           }
-          button:hover {
-            transform: scale(1.05);
-          }
         </style>
       </head>
       <body>
         <div class="container">
-          <div class="error">❌</div>
+          <div class="error-icon">❌</div>
           <h1>Authentication Failed</h1>
           <p>${error.message}</p>
           <button onclick="window.close()">Close Window</button>
