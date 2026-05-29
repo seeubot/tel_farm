@@ -333,463 +333,107 @@ app.get('/', (req, res) => {
   });
 });
 
-// ==================== HELPER: Generate Redirect HTML ====================
-function getRedirectHTML(data, error, logs = []) {
-  const timestamp = new Date().toISOString();
-  
-  let deepLink;
-  if (data) {
-    const params = new URLSearchParams({
-      token: data.token,
-      userId: data.userId,
-      email: data.email,
-      role: data.role
-    });
-    deepLink = `agriagent://auth?${params.toString()}`;
-  } else {
-    const errorMsg = error || 'Unknown error';
-    deepLink = `agriagent://auth?error=${encodeURIComponent(errorMsg)}`;
-  }
-
-  const logEntries = logs.map(log => 
-    `<div class="log-entry"><span class="log-timestamp">[${log.timestamp || timestamp}]</span> ${log.message}</div>`
-  ).join('');
-
-  return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>AgriAgent - Redirecting...</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          min-height: 100vh;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          padding: 20px;
-        }
-        .container {
-          background: white;
-          padding: 30px;
-          border-radius: 20px;
-          box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-          text-align: center;
-          max-width: 500px;
-          width: 100%;
-        }
-        .status-icon {
-          font-size: 48px;
-          margin-bottom: 15px;
-        }
-        h2 {
-          color: #333;
-          margin-bottom: 10px;
-          font-size: 24px;
-        }
-        .message {
-          color: #666;
-          margin-bottom: 20px;
-          line-height: 1.5;
-        }
-        .error-message {
-          color: #dc3545;
-          background: #f8d7da;
-          padding: 10px;
-          border-radius: 8px;
-          margin: 10px 0;
-        }
-        .success-message {
-          color: #28a745;
-          background: #d4edda;
-          padding: 10px;
-          border-radius: 8px;
-          margin: 10px 0;
-        }
-        .button-group {
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-          margin: 20px 0;
-        }
-        button {
-          padding: 12px 24px;
-          border: none;
-          border-radius: 10px;
-          font-size: 14px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.3s;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 8px;
-        }
-        button:active {
-          transform: scale(0.98);
-        }
-        .primary-btn {
-          background: #667eea;
-          color: white;
-        }
-        .primary-btn:hover {
-          background: #5a67d8;
-        }
-        .secondary-btn {
-          background: #e2e8f0;
-          color: #4a5568;
-        }
-        .secondary-btn:hover {
-          background: #cbd5e0;
-        }
-        .copy-btn {
-          background: #48bb78;
-          color: white;
-        }
-        .copy-btn:hover {
-          background: #38a169;
-        }
-        button:disabled {
-          background: #cbd5e0;
-          color: #a0aec0;
-          cursor: not-allowed;
-        }
-        .log-container {
-          margin-top: 20px;
-          padding: 15px;
-          background: #1a202c;
-          border-radius: 10px;
-          text-align: left;
-          max-height: 250px;
-          overflow-y: auto;
-        }
-        .log-title {
-          color: #a0aec0;
-          font-size: 12px;
-          font-weight: 600;
-          margin-bottom: 10px;
-          text-transform: uppercase;
-          letter-spacing: 1px;
-        }
-        .log-entry {
-          color: #68d391;
-          font-family: 'Courier New', monospace;
-          font-size: 11px;
-          margin: 4px 0;
-          padding: 3px 0;
-          border-bottom: 1px solid #2d3748;
-        }
-        .log-timestamp {
-          color: #a0aec0;
-          font-size: 10px;
-        }
-        .deep-link-display {
-          background: #f7fafc;
-          padding: 10px;
-          border-radius: 8px;
-          font-family: 'Courier New', monospace;
-          font-size: 11px;
-          word-break: break-all;
-          color: #4a5568;
-          margin: 10px 0;
-          border: 1px solid #e2e8f0;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="status-icon">${data ? '✅' : '❌'}</div>
-        <h2>${data ? 'Authentication Successful' : 'Authentication Failed'}</h2>
-        
-        ${data ? 
-          `<div class="success-message">
-            Successfully authenticated!<br>
-            Redirecting to AgriAgent app...
-          </div>` :
-          `<div class="error-message">
-            ${error || 'An error occurred during authentication'}
-          </div>`
-        }
-        
-        <div class="deep-link-display">
-          <strong>Deep Link:</strong><br>
-          ${deepLink}
-        </div>
-        
-        <div class="button-group">
-          <button class="primary-btn" onclick="retryRedirect()" ${!data ? 'disabled' : ''}>
-            🔄 Open AgriAgent App
-          </button>
-          <button class="copy-btn" onclick="copyDeepLink()">
-            📋 Copy Deep Link
-          </button>
-          <button class="secondary-btn" onclick="showDebugInfo()">
-            🔍 Debug Info
-          </button>
-        </div>
-        
-        <div class="log-container">
-          <div class="log-title">📋 Redirect Logs</div>
-          <div id="logs">
-            <div class="log-entry"><span class="log-timestamp">[${timestamp}]</span> Page loaded</div>
-            <div class="log-entry"><span class="log-timestamp">[${timestamp}]</span> Deep link generated</div>
-            ${logEntries}
-          </div>
-        </div>
-      </div>
-
-      <script>
-        const deepLink = '${deepLink.replace(/'/g, "\\'")}';
-        const hasData = ${!!data};
-        const logs = document.getElementById('logs');
-        
-        function addLog(message) {
-          const logEntry = document.createElement('div');
-          logEntry.className = 'log-entry';
-          logEntry.innerHTML = '<span class="log-timestamp">[' + new Date().toISOString() + ']</span> ' + message;
-          logs.appendChild(logEntry);
-          logs.scrollTop = logs.scrollHeight;
-        }
-
-        function tryRedirect(method) {
-          addLog('Attempting redirect via: ' + method);
-          
-          switch(method) {
-            case 'location':
-              window.location.href = deepLink;
-              break;
-            case 'iframe':
-              const iframe = document.createElement('iframe');
-              iframe.style.display = 'none';
-              iframe.src = deepLink;
-              document.body.appendChild(iframe);
-              setTimeout(() => document.body.removeChild(iframe), 2000);
-              break;
-            case 'anchor':
-              const a = document.createElement('a');
-              a.href = deepLink;
-              a.style.display = 'none';
-              document.body.appendChild(a);
-              a.click();
-              setTimeout(() => document.body.removeChild(a), 1000);
-              break;
-            case 'intent':
-              const intentUrl = 'intent://auth?' + deepLink.split('?')[1] + '#Intent;scheme=agriagent;package=com.yourcompany.agriagent;end';
-              window.location.href = intentUrl;
-              break;
-          }
-          
-          setTimeout(() => {
-            addLog('Still on page after ' + method + ' redirect attempt');
-          }, 1500);
-        }
-
-        function retryRedirect() {
-          addLog('Manual retry initiated');
-          tryRedirect('location');
-          setTimeout(() => {
-            addLog('Trying alternative redirect methods...');
-            tryRedirect('iframe');
-          }, 1500);
-          setTimeout(() => tryRedirect('anchor'), 3000);
-          if (/android/i.test(navigator.userAgent)) {
-            setTimeout(() => tryRedirect('intent'), 4500);
-          }
-        }
-
-        function copyDeepLink() {
-          const textarea = document.createElement('textarea');
-          textarea.value = deepLink;
-          textarea.style.position = 'fixed';
-          textarea.style.opacity = '0';
-          document.body.appendChild(textarea);
-          textarea.select();
-          try {
-            document.execCommand('copy');
-            addLog('✅ Deep link copied to clipboard');
-            alert('Deep link copied! You can paste and open it in your notes app.');
-          } catch (err) {
-            navigator.clipboard.writeText(deepLink).then(() => {
-              addLog('✅ Deep link copied to clipboard (modern API)');
-              alert('Deep link copied! You can paste and open it in your notes app.');
-            }).catch(err => {
-              addLog('❌ Failed to copy: ' + err);
-              alert('Failed to copy. Please manually copy the deep link shown above.');
-            });
-          }
-          document.body.removeChild(textarea);
-        }
-
-        function showDebugInfo() {
-          const info = {
-            userAgent: navigator.userAgent,
-            platform: navigator.platform,
-            language: navigator.language,
-            cookiesEnabled: navigator.cookieEnabled,
-            onLine: navigator.onLine,
-            deepLink: deepLink,
-            hasData: hasData,
-            timestamp: new Date().toISOString()
-          };
-          addLog('Debug Info: ' + JSON.stringify(info, null, 2));
-          alert('Debug info added to logs. Please scroll down to view.');
-        }
-
-        window.addEventListener('load', () => {
-          addLog('Window loaded');
-          if (hasData) {
-            addLog('Auto-redirect will start in 1 second...');
-            setTimeout(() => {
-              addLog('Starting auto-redirect sequence');
-              tryRedirect('location');
-            }, 1000);
-            setTimeout(() => tryRedirect('iframe'), 2500);
-            setTimeout(() => tryRedirect('anchor'), 4000);
-            if (/android/i.test(navigator.userAgent)) {
-              setTimeout(() => tryRedirect('intent'), 5500);
-            }
-          } else {
-            addLog('Auto-redirect skipped due to authentication error');
-          }
-        });
-
-        window.addEventListener('error', (e) => {
-          addLog('❌ JS Error: ' + e.message + ' at ' + e.filename + ':' + e.lineno);
-        });
-
-        document.addEventListener('visibilitychange', () => {
-          addLog('Page visibility: ' + (document.hidden ? 'hidden' : 'visible'));
-        });
-      </script>
-    </body>
-    </html>
-  `;
-}
-
-// ==================== GOOGLE AUTH — CALLBACK (HTML Page with Multiple Redirect Methods) ====================
+// ==================== GOOGLE AUTH — CALLBACK (302 Redirect — works with openAuthSessionAsync) ====================
 app.get('/api/auth/google-mobile/callback', async (req, res) => {
-  const logs = [];
-  
   try {
-    logs.push({ timestamp: new Date().toISOString(), message: 'Callback received' });
-    
+    console.log('[Auth Callback] Received request');
+
     const { code, state: codeVerifier, error: googleError } = req.query;
-    
-    logs.push({ 
-      timestamp: new Date().toISOString(), 
-      message: `Code: ${!!code}, Verifier: ${!!codeVerifier}, Google Error: ${googleError || 'none'}` 
-    });
-    
-    console.log('[Auth Callback] Received:', {
+
+    console.log('[Auth Callback] Params:', {
       hasCode: !!code,
       hasVerifier: !!codeVerifier,
-      error: googleError || 'none'
+      error: googleError || 'none',
     });
-    
+
+    // ── Google returned an error ──────────────────────────────────────────────
     if (googleError) {
       console.error('[Auth Callback] Google error:', googleError);
-      logs.push({ timestamp: new Date().toISOString(), message: `Google error: ${googleError}` });
-      return res.send(getRedirectHTML(null, googleError, logs));
+      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
     }
-    
+
+    // ── Missing params ────────────────────────────────────────────────────────
     if (!code || !codeVerifier) {
-      console.error('[Auth Callback] Missing parameters');
-      logs.push({ timestamp: new Date().toISOString(), message: 'Missing code or verifier' });
-      return res.send(getRedirectHTML(null, 'Missing authentication parameters', logs));
+      console.error('[Auth Callback] Missing code or verifier');
+      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Missing authentication parameters')}`);
     }
-    
+
+    // ── Exchange code for tokens ──────────────────────────────────────────────
     const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
-    logs.push({ timestamp: new Date().toISOString(), message: 'Exchanging code for tokens...' });
-    
+    console.log('[Auth Callback] Exchanging code, redirectUri:', redirectUri);
+
     const { tokens } = await googleOAuthClient.getToken({
       code,
       codeVerifier,
-      redirect_uri: redirectUri
+      redirect_uri: redirectUri,
     });
-    
-    logs.push({ 
-      timestamp: new Date().toISOString(), 
-      message: `Tokens received - Access: ${!!tokens.access_token}` 
-    });
-    
-    console.log('[Auth Callback] Tokens:', { hasAccessToken: !!tokens.access_token });
-    
+
+    console.log('[Auth Callback] Tokens received:', { hasAccessToken: !!tokens.access_token });
+
     if (!tokens.access_token) {
-      logs.push({ timestamp: new Date().toISOString(), message: 'No access token received' });
-      return res.send(getRedirectHTML(null, 'Failed to obtain access token', logs));
+      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to obtain access token')}`);
     }
-    
-    logs.push({ timestamp: new Date().toISOString(), message: 'Fetching user info from Google...' });
-    
+
+    // ── Fetch Google user info ────────────────────────────────────────────────
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
     const googleUser = await userInfoRes.json();
-    
-    logs.push({ 
-      timestamp: new Date().toISOString(), 
-      message: `User: ${googleUser.email}` 
-    });
-    
-    console.log('[Auth Callback] User:', { email: googleUser.email });
-    
-    logs.push({ timestamp: new Date().toISOString(), message: 'Looking up user in database...' });
-    
+
+    console.log('[Auth Callback] Google user:', { email: googleUser.email });
+
+    if (!googleUser.email) {
+      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to fetch user info from Google')}`);
+    }
+
+    // ── Find or create user ───────────────────────────────────────────────────
     let user = await User.findOne({ email: googleUser.email });
     if (!user) {
-      logs.push({ timestamp: new Date().toISOString(), message: 'Creating new user...' });
+      console.log('[Auth Callback] Creating new user...');
       user = await User.create({
         googleId: googleUser.sub,
         email: googleUser.email,
-        profile: { 
-          name: googleUser.name, 
-          profileImage: googleUser.picture 
+        profile: {
+          name: googleUser.name,
+          profileImage: googleUser.picture,
         },
         verification: { isVerified: false },
         ageVerified: false,
       });
-      logs.push({ timestamp: new Date().toISOString(), message: `User created: ${user._id}` });
+      console.log('[Auth Callback] User created:', user._id);
     } else {
-      logs.push({ timestamp: new Date().toISOString(), message: `User found: ${user._id}` });
+      console.log('[Auth Callback] User found:', user._id);
       if (!user.googleId) {
         user.googleId = googleUser.sub;
         await user.save();
-        logs.push({ timestamp: new Date().toISOString(), message: 'Updated Google ID' });
       }
     }
-    
-    // Generate JWT token
+
+    // ── Generate JWT ──────────────────────────────────────────────────────────
     const appToken = jwt.sign(
       { userId: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET || 'agriagent-secret-key',
       { expiresIn: '30d' }
     );
-    
-    logs.push({ 
-      timestamp: new Date().toISOString(), 
-      message: '✅ JWT token generated, sending redirect page' 
+
+    // ── KEY FIX: 302 redirect to the app's deep link scheme ──────────────────
+    // openAuthSessionAsync intercepts this redirect before Chrome ever opens it,
+    // so the custom scheme works reliably on both iOS and Android.
+    const params = new URLSearchParams({
+      token:  appToken,
+      userId: user._id.toString(),
+      email:  user.email,
+      role:   user.role,
     });
-    
-    console.log('[Auth Callback] ✅ Success, sending HTML page');
-    
-    res.send(getRedirectHTML({
-      token: appToken,
-      userId: user._id,
-      email: user.email,
-      role: user.role,
-    }, null, logs));
-    
+
+    const deepLink = `agriagent://auth?${params.toString()}`;
+    console.log('[Auth Callback] ✅ Redirecting to deep link:', deepLink.substring(0, 60) + '...');
+
+    return res.redirect(302, deepLink);
+
   } catch (error) {
     console.error('[Auth Callback] ❌ Error:', error);
-    logs.push({ 
-      timestamp: new Date().toISOString(), 
-      message: `Error: ${error.message}` 
-    });
-    
-    res.send(getRedirectHTML(null, error.message, logs));
+    return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(error.message || 'Server error')}`);
   }
 });
 
@@ -902,7 +546,7 @@ app.post('/api/auth/google-mobile', async (req, res) => {
 app.get('/api/auth/session', authenticate, async (req, res) => {
   try {
     const token = req.headers.authorization?.split(' ')[1] || '';
-    
+
     res.json({
       success: true,
       token: token,
