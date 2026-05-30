@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
-app.set('trust proxy', 1); // Trust Koyeb's load balancer
+app.set('trust proxy', 1);
 
 // ==================== DATABASE CONNECTION ====================
 const connectDB = async () => {
@@ -27,13 +27,11 @@ let firebaseAdmin = null;
 if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
   try {
     let privateKey = process.env.FIREBASE_PRIVATE_KEY;
-    if (privateKey.includes('\\n')) {
-      privateKey = privateKey.replace(/\\n/g, '\n');
-    }
+    if (privateKey.includes('\\n')) privateKey = privateKey.replace(/\\n/g, '\n');
     firebaseAdmin = admin.initializeApp({
       credential: admin.credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        privateKey: privateKey,
+        projectId:   process.env.FIREBASE_PROJECT_ID,
+        privateKey:  privateKey,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       }),
     });
@@ -71,58 +69,58 @@ app.use('/api/', limiter);
 const userSchema = new mongoose.Schema({
   firebaseUid: { type: String, unique: true, sparse: true },
   googleId:    { type: String, unique: true, sparse: true },
-  email: { type: String, required: true, unique: true },
-  role: { type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'], default: 'farmer' },
+  email:       { type: String, required: true, unique: true },
+  role:        { type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'], default: 'farmer' },
   ageVerified: { type: Boolean, default: false },
-  age: { type: Number },
+  age:         { type: Number },
   profile: {
-    name: { type: String, required: true },
-    teluguName: { type: String },
-    phone: { type: String },
+    name:         { type: String, required: true },
+    teluguName:   { type: String },
+    phone:        { type: String },
     profileImage: { type: String },
     location: {
-      lat: Number,
-      lng: Number,
-      address: String,
-      village: String,
+      lat:      Number,
+      lng:      Number,
+      address:  String,
+      village:  String,
       district: String,
     },
   },
   verification: {
-    isPhoneVerified: { type: Boolean, default: false },
+    isPhoneVerified:  { type: Boolean, default: false },
     isAadharVerified: { type: Boolean, default: false },
-    isVerified: { type: Boolean, default: false },
-    verifiedAt: Date,
+    isVerified:       { type: Boolean, default: false },
+    verifiedAt:       Date,
     documents: {
       aadharUrl: String,
-      panUrl: String,
+      panUrl:    String,
     },
   },
   labourerDetails: {
-    age: Number,
-    experience: Number,
-    skills: [String],
+    age:         Number,
+    experience:  Number,
+    skills:      [String],
     isAvailable: { type: Boolean, default: true },
   },
   contractorDetails: {
     companyName: String,
-    gstNumber: String,
-    teamSize: String,
-    crops: [String],
+    gstNumber:   String,
+    teamSize:    String,
+    crops:       [String],
   },
   ratings: {
     average: { type: Number, default: 0 },
     count:   { type: Number, default: 0 },
   },
-  isActive: { type: Boolean, default: true },
+  isActive:  { type: Boolean, default: true },
   deletedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
 
 const equipmentSchema = new mongoose.Schema({
-  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  name: { type: String, required: true },
+  ownerId:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  name:     { type: String, required: true },
   teluguName: { type: String },
   category: {
     type: String,
@@ -131,19 +129,19 @@ const equipmentSchema = new mongoose.Schema({
   },
   description: { type: String },
   pricing: {
-    perDay:   { type: Number, required: true },
-    perHour:  { type: Number },
-    deposit:  { type: Number, required: true },
+    perDay:  { type: Number, required: true },
+    perHour: { type: Number },
+    deposit: { type: Number, required: true },
   },
   location: {
-    lat:      { type: Number, required: true },
-    lng:      { type: Number, required: true },
-    address:  String,
-    village:  String,
+    lat:     { type: Number, required: true },
+    lng:     { type: Number, required: true },
+    address: String,
+    village: String,
     district: String,
   },
   features: [String],
-  images: [String],
+  images:   [String],
   availability: {
     isAvailable:   { type: Boolean, default: true },
     availableFrom: Date,
@@ -205,11 +203,48 @@ const reportSchema = new mongoose.Schema({
   createdAt:   { type: Date, default: Date.now },
 });
 
+const problemSchema = new mongoose.Schema({
+  farmerId:          { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title:             { type: String, required: true },
+  teluguTitle:       { type: String },
+  description:       { type: String, required: true },
+  teluguDescription: { type: String },
+  cropType:          { type: String, required: true },
+  location: {
+    lat:     Number,
+    lng:     Number,
+    address: String,
+    village: String,
+  },
+  type:          { type: String, enum: ['text', 'image', 'video'], default: 'text' },
+  mediaUrl:      { type: String },
+  upvotes:       { type: Number, default: 0 },
+  upvotedBy:     [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  solutionCount: { type: Number, default: 0 },
+  isActive:      { type: Boolean, default: true },
+  createdAt:     { type: Date, default: Date.now },
+});
+
+const solutionSchema = new mongoose.Schema({
+  problemId:      { type: mongoose.Schema.Types.ObjectId, ref: 'Problem', required: true },
+  farmerId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  solution:       { type: String, required: true },
+  teluguSolution: { type: String },
+  mediaUrl:       { type: String },
+  mediaType:      { type: String, enum: ['image', 'video'] },
+  upvotes:        { type: Number, default: 0 },
+  upvotedBy:      [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  isActive:       { type: Boolean, default: true },
+  createdAt:      { type: Date, default: Date.now },
+});
+
 const User      = mongoose.model('User',      userSchema);
 const Equipment = mongoose.model('Equipment', equipmentSchema);
 const Produce   = mongoose.model('Produce',   produceSchema);
 const Booking   = mongoose.model('Booking',   bookingSchema);
 const Report    = mongoose.model('Report',    reportSchema);
+const Problem   = mongoose.model('Problem',   problemSchema);
+const Solution  = mongoose.model('Solution',  solutionSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -227,17 +262,13 @@ const authenticate = async (req, res, next) => {
       return next();
     }
 
-    // JWT token (from mobile callback)
+    // JWT token
     if (rawToken.startsWith('eyJ')) {
       try {
         const decoded = jwt.verify(rawToken, process.env.JWT_SECRET || 'agriagent-secret-key');
         const user = await User.findById(decoded.userId);
-        if (!user) {
-          return res.status(401).json({ error: 'User not found' });
-        }
-        if (!user.isActive) {
-          return res.status(401).json({ error: 'Account has been deactivated' });
-        }
+        if (!user) return res.status(401).json({ error: 'User not found' });
+        if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
         req.user = user;
         return next();
       } catch (jwtError) {
@@ -245,53 +276,37 @@ const authenticate = async (req, res, next) => {
       }
     }
 
-    // PKCE / Google access token
+    // Google access token (PKCE)
     if (rawToken.startsWith('google_')) {
       const accessToken = rawToken.slice(7);
-      const tokenInfoRes = await fetch(
-        `https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`
-      );
+      const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
       const tokenInfo = await tokenInfoRes.json();
-
       if (!tokenInfoRes.ok || tokenInfo.error) {
         return res.status(401).json({ error: 'Invalid Google access token' });
       }
-
-      let user = await User.findOne({ email: tokenInfo.email });
-      if (!user) {
-        return res.status(401).json({ error: 'User not found. Please sign in first.' });
-      }
-      if (!user.isActive) {
-        return res.status(401).json({ error: 'Account has been deactivated' });
-      }
-
+      const user = await User.findOne({ email: tokenInfo.email });
+      if (!user) return res.status(401).json({ error: 'User not found. Please sign in first.' });
+      if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
       req.user = user;
       return next();
     }
 
     // Firebase ID token
-    if (!firebaseAdmin) {
-      return res.status(401).json({ error: 'Auth service not configured' });
-    }
+    if (!firebaseAdmin) return res.status(401).json({ error: 'Auth service not configured' });
 
     const decodedToken = await firebaseAdmin.auth().verifyIdToken(rawToken);
     let user = await User.findOne({ firebaseUid: decodedToken.uid });
-
     if (!user) {
       user = await User.create({
         firebaseUid: decodedToken.uid,
-        email: decodedToken.email,
+        email:       decodedToken.email,
         profile: {
-          name: decodedToken.name || decodedToken.email.split('@')[0],
+          name:         decodedToken.name || decodedToken.email.split('@')[0],
           profileImage: decodedToken.picture,
         },
       });
     }
-
-    if (!user.isActive) {
-      return res.status(401).json({ error: 'Account has been deactivated' });
-    }
-
+    if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
     req.user = user;
     next();
   } catch (error) {
@@ -300,12 +315,22 @@ const authenticate = async (req, res, next) => {
   }
 };
 
+// ==================== HELPER ====================
+const calculateDistance = (lat1, lng1, lat2, lng2) => {
+  if (!lat1 || !lng1 || !lat2 || !lng2) return 999;
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+};
+
 // ==================== HEALTH CHECK ====================
 app.get('/health', async (req, res) => {
-  const dbStatus = {
-    0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting',
-  }[mongoose.connection.readyState] || 'unknown';
-
+  const dbStatus = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' }[mongoose.connection.readyState] || 'unknown';
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
@@ -322,128 +347,95 @@ app.get('/', (req, res) => {
     version: '1.0.0',
     status: 'active',
     endpoints: {
-      health:    'GET /health',
-      auth:      'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/google-mobile/callback, GET /api/auth/me, PUT /api/auth/role',
-      equipment: 'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
-      produce:   'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
-      bookings:  'GET,POST /api/bookings, PUT /api/bookings/:id',
-      users:     'DELETE /api/users/delete-account, GET /api/users/export-data',
-      reports:   'POST /api/reports',
+      health:      'GET /health',
+      auth:        'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/google-mobile/callback, GET /api/auth/me, PUT /api/auth/role, PUT /api/auth/profile, POST /api/auth/verify-age, GET /api/auth/session',
+      equipment:   'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
+      produce:     'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
+      bookings:    'GET,POST /api/bookings, PUT /api/bookings/:id',
+      users:       'DELETE /api/users/delete-account, GET /api/users/export-data',
+      reports:     'POST /api/reports',
+      problems:    'GET,POST /api/problems, GET /api/problems/:id, POST /api/problems/:id/solutions, POST /api/problems/:id/upvote',
+      solutions:   'POST /api/solutions/:id/upvote',
+      labourers:   'GET /api/labourers, GET /api/labourers/nearby, GET /api/labourers/:id',
+      contractors: 'GET /api/contractors, GET /api/contractors/:id',
+      dashboard:   'GET /api/dashboard/stats',
     },
   });
 });
 
-// ==================== GOOGLE AUTH — CALLBACK (302 Redirect — works with openAuthSessionAsync) ====================
+// ==================== AUTH — GOOGLE OAUTH CALLBACK ====================
 app.get('/api/auth/google-mobile/callback', async (req, res) => {
   try {
     console.log('[Auth Callback] Received request');
-
     const { code, state: codeVerifier, error: googleError } = req.query;
+    console.log('[Auth Callback] Params:', { hasCode: !!code, hasVerifier: !!codeVerifier, error: googleError || 'none' });
 
-    console.log('[Auth Callback] Params:', {
-      hasCode: !!code,
-      hasVerifier: !!codeVerifier,
-      error: googleError || 'none',
-    });
-
-    // ── Google returned an error ──────────────────────────────────────────────
     if (googleError) {
       console.error('[Auth Callback] Google error:', googleError);
       return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
     }
-
-    // ── Missing params ────────────────────────────────────────────────────────
     if (!code || !codeVerifier) {
       console.error('[Auth Callback] Missing code or verifier');
       return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Missing authentication parameters')}`);
     }
 
-    // ── Exchange code for tokens ──────────────────────────────────────────────
     const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
     console.log('[Auth Callback] Exchanging code, redirectUri:', redirectUri);
 
-    const { tokens } = await googleOAuthClient.getToken({
-      code,
-      codeVerifier,
-      redirect_uri: redirectUri,
-    });
-
+    const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier, redirect_uri: redirectUri });
     console.log('[Auth Callback] Tokens received:', { hasAccessToken: !!tokens.access_token });
 
     if (!tokens.access_token) {
       return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to obtain access token')}`);
     }
 
-    // ── Fetch Google user info ────────────────────────────────────────────────
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
     const googleUser = await userInfoRes.json();
-
     console.log('[Auth Callback] Google user:', { email: googleUser.email });
 
     if (!googleUser.email) {
       return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to fetch user info from Google')}`);
     }
 
-    // ── Find or create user ───────────────────────────────────────────────────
     let user = await User.findOne({ email: googleUser.email });
     if (!user) {
       console.log('[Auth Callback] Creating new user...');
       user = await User.create({
         googleId: googleUser.sub,
-        email: googleUser.email,
-        profile: {
-          name: googleUser.name,
-          profileImage: googleUser.picture,
-        },
+        email:    googleUser.email,
+        profile:  { name: googleUser.name, profileImage: googleUser.picture },
         verification: { isVerified: false },
         ageVerified: false,
       });
       console.log('[Auth Callback] User created:', user._id);
     } else {
       console.log('[Auth Callback] User found:', user._id);
-      if (!user.googleId) {
-        user.googleId = googleUser.sub;
-        await user.save();
-      }
+      if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
     }
 
-    // ── Generate JWT ──────────────────────────────────────────────────────────
     const appToken = jwt.sign(
       { userId: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET || 'agriagent-secret-key',
       { expiresIn: '30d' }
     );
 
-    // ── KEY FIX: 302 redirect to the app's deep link scheme ──────────────────
-    // openAuthSessionAsync intercepts this redirect before Chrome ever opens it,
-    // so the custom scheme works reliably on both iOS and Android.
-    const params = new URLSearchParams({
-      token:  appToken,
-      userId: user._id.toString(),
-      email:  user.email,
-      role:   user.role,
-    });
-
+    const params = new URLSearchParams({ token: appToken, userId: user._id.toString(), email: user.email, role: user.role });
     const deepLink = `agriagent://auth?${params.toString()}`;
     console.log('[Auth Callback] ✅ Redirecting to deep link:', deepLink.substring(0, 60) + '...');
-
     return res.redirect(302, deepLink);
-
   } catch (error) {
     console.error('[Auth Callback] ❌ Error:', error);
     return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(error.message || 'Server error')}`);
   }
 });
 
-// ==================== GOOGLE AUTH — LEGACY ====================
+// ==================== AUTH — LEGACY GOOGLE ====================
 app.post('/api/auth/google', async (req, res) => {
   try {
     const { email, name, picture, googleId } = req.body;
-
     let user = await User.findOne({ email });
-
     if (!user) {
       user = await User.create({
         firebaseUid: googleId,
@@ -453,202 +445,110 @@ app.post('/api/auth/google', async (req, res) => {
         ageVerified: false,
       });
     }
-
-    res.json({
-      success: true,
-      user: {
-        id: user._id,
-        email: user.email,
-        role: user.role,
-        profile: user.profile,
-        verification: user.verification,
-        ageVerified: user.ageVerified,
-      },
-    });
+    res.json({ success: true, user: { id: user._id, email: user.email, role: user.role, profile: user.profile, verification: user.verification, ageVerified: user.ageVerified } });
   } catch (error) {
     console.error('Google auth error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== GOOGLE AUTH — PKCE MOBILE FLOW ====================
+// ==================== AUTH — PKCE MOBILE FLOW ====================
 app.post('/api/auth/google-mobile', async (req, res) => {
   try {
     const { code, codeVerifier, redirectUri } = req.body;
-
     if (!code || !codeVerifier || !redirectUri) {
       return res.status(400).json({ error: 'code, codeVerifier, and redirectUri are required' });
     }
 
     googleOAuthClient.redirectUri = redirectUri;
-    const { tokens } = await googleOAuthClient.getToken({
-      code,
-      codeVerifier,
-    });
-
-    if (!tokens.access_token) {
-      return res.status(400).json({ error: 'Failed to obtain access token from Google' });
-    }
+    const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier });
+    if (!tokens.access_token) return res.status(400).json({ error: 'Failed to obtain access token from Google' });
 
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
-
-    if (!userInfoRes.ok) {
-      return res.status(400).json({ error: 'Failed to fetch Google user info' });
-    }
+    if (!userInfoRes.ok) return res.status(400).json({ error: 'Failed to fetch Google user info' });
 
     const googleUser = await userInfoRes.json();
-
     let user = await User.findOne({ email: googleUser.email });
-
     if (!user) {
       user = await User.create({
         googleId: googleUser.sub,
-        email: googleUser.email,
-        profile: {
-          name: googleUser.name,
-          profileImage: googleUser.picture,
-        },
+        email:    googleUser.email,
+        profile:  { name: googleUser.name, profileImage: googleUser.picture },
         verification: { isVerified: false },
         ageVerified: false,
       });
     } else {
-      if (!user.googleId) {
-        user.googleId = googleUser.sub;
-        await user.save();
-      }
+      if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
     }
+    if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
 
-    if (!user.isActive) {
-      return res.status(401).json({ error: 'Account has been deactivated' });
-    }
-
-    res.json({
-      success: true,
-      idToken: tokens.access_token,
-      user: {
-        id: user._id,
-        email: user.email,
-        role: user.role,
-        profile: user.profile,
-        verification: user.verification,
-        ageVerified: user.ageVerified,
-      },
-    });
+    res.json({ success: true, idToken: tokens.access_token, user: { id: user._id, email: user.email, role: user.role, profile: user.profile, verification: user.verification, ageVerified: user.ageVerified } });
   } catch (error) {
     console.error('PKCE token exchange error:', error);
     res.status(500).json({ error: error.message || 'Token exchange failed' });
   }
 });
 
-// ==================== SESSION CHECK ENDPOINT ====================
+// ==================== AUTH — SESSION / ME / ROLE / PROFILE / AGE ====================
 app.get('/api/auth/session', authenticate, async (req, res) => {
   try {
     const token = req.headers.authorization?.split(' ')[1] || '';
-
-    res.json({
-      success: true,
-      token: token,
-      user: {
-        id: req.user._id,
-        email: req.user.email,
-        role: req.user.role,
-        profile: req.user.profile,
-        verification: req.user.verification,
-        ageVerified: req.user.ageVerified
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+    res.json({ success: true, token, user: { id: req.user._id, email: req.user.email, role: req.user.role, profile: req.user.profile, verification: req.user.verification, ageVerified: req.user.ageVerified } });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== AGE VERIFICATION ====================
-app.post('/api/auth/verify-age', authenticate, async (req, res) => {
-  try {
-    const { age } = req.body;
-    if (age < 18) {
-      return res.status(400).json({ error: 'You must be 18 years or older to use AgriAgent' });
-    }
-    req.user.ageVerified = true;
-    req.user.age = age;
-    await req.user.save();
-    res.json({ success: true, message: 'Age verified successfully' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== AUTH ROUTES ====================
 app.get('/api/auth/me', authenticate, async (req, res) => {
   try {
-    res.json({
-      success: true,
-      user: {
-        id: req.user._id,
-        email: req.user.email,
-        role: req.user.role,
-        profile: req.user.profile,
-        verification: req.user.verification,
-        labourerDetails: req.user.labourerDetails,
-        contractorDetails: req.user.contractorDetails,
-        ratings: req.user.ratings,
-        ageVerified: req.user.ageVerified,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+    res.json({ success: true, user: { id: req.user._id, email: req.user.email, role: req.user.role, profile: req.user.profile, verification: req.user.verification, labourerDetails: req.user.labourerDetails, contractorDetails: req.user.contractorDetails, ratings: req.user.ratings, ageVerified: req.user.ageVerified } });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/auth/role', authenticate, async (req, res) => {
   try {
     const { role } = req.body;
-    if (!['farmer', 'labourer', 'contractor', 'buyer'].includes(role)) {
-      return res.status(400).json({ error: 'Invalid role' });
-    }
+    if (!['farmer', 'labourer', 'contractor', 'buyer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
     req.user.role = role;
     await req.user.save();
     res.json({ success: true, role: req.user.role });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/auth/profile', authenticate, async (req, res) => {
   try {
     const { name, teluguName, phone, location, labourerDetails, contractorDetails } = req.body;
-    if (name)               req.user.profile.name = name;
-    if (teluguName)         req.user.profile.teluguName = teluguName;
-    if (phone)              req.user.profile.phone = phone;
-    if (location)           req.user.profile.location = location;
-    if (labourerDetails)    req.user.labourerDetails = labourerDetails;
-    if (contractorDetails)  req.user.contractorDetails = contractorDetails;
+    if (name)              req.user.profile.name = name;
+    if (teluguName)        req.user.profile.teluguName = teluguName;
+    if (phone)             req.user.profile.phone = phone;
+    if (location)          req.user.profile.location = location;
+    if (labourerDetails)   req.user.labourerDetails = labourerDetails;
+    if (contractorDetails) req.user.contractorDetails = contractorDetails;
     req.user.updatedAt = Date.now();
     await req.user.save();
     res.json({ success: true, user: req.user });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/auth/verify-age', authenticate, async (req, res) => {
+  try {
+    const { age } = req.body;
+    if (age < 18) return res.status(400).json({ error: 'You must be 18 years or older to use AgriAgent' });
+    req.user.ageVerified = true;
+    req.user.age = age;
+    await req.user.save();
+    res.json({ success: true, message: 'Age verified successfully' });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==================== USER MANAGEMENT ====================
 app.delete('/api/users/delete-account', authenticate, async (req, res) => {
   try {
     const userId = req.user._id;
-    await User.findByIdAndUpdate(userId, {
-      isActive: false,
-      deletedAt: new Date(),
-      'profile.name': '[Deleted User]',
-      'profile.phone': null,
-    });
+    await User.findByIdAndUpdate(userId, { isActive: false, deletedAt: new Date(), 'profile.name': '[Deleted User]', 'profile.phone': null });
     await Equipment.deleteMany({ ownerId: userId });
     await Produce.deleteMany({ farmerId: userId });
-    await Booking.updateMany(
-      { $or: [{ renterId: userId }, { ownerId: userId }] },
-      { $set: { renterId: null, ownerId: null, totalAmount: 0 } }
-    );
+    await Booking.updateMany({ $or: [{ renterId: userId }, { ownerId: userId }] }, { $set: { renterId: null, ownerId: null, totalAmount: 0 } });
     res.json({ success: true, message: 'Account permanently deleted' });
   } catch (error) {
     console.error('Delete account error:', error);
@@ -661,61 +561,37 @@ app.get('/api/users/export-data', authenticate, async (req, res) => {
     const user      = await User.findById(req.user._id).select('-__v');
     const equipment = await Equipment.find({ ownerId: req.user._id });
     const produce   = await Produce.find({ farmerId: req.user._id });
-    const bookings  = await Booking.find({
-      $or: [{ renterId: req.user._id }, { ownerId: req.user._id }],
-    });
+    const bookings  = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] });
     res.json({ success: true, exportedAt: new Date(), data: { user, equipment, produce, bookings } });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== REPORT ROUTE ====================
+// ==================== REPORTS ====================
 app.post('/api/reports', authenticate, async (req, res) => {
   try {
     const { type, targetId, reason, description } = req.body;
-    if (!['user', 'equipment', 'produce'].includes(type)) {
-      return res.status(400).json({ error: 'Invalid report type' });
-    }
-    const report = await Report.create({
-      reporterId: req.user._id,
-      type,
-      targetId,
-      reason,
-      description,
-    });
+    if (!['user', 'equipment', 'produce'].includes(type)) return res.status(400).json({ error: 'Invalid report type' });
+    const report = await Report.create({ reporterId: req.user._id, type, targetId, reason, description });
     console.log(`📢 New report: ${type}/${targetId} by ${req.user.email}`);
-    res.json({
-      success: true,
-      message: 'Report submitted successfully. We will review within 24 hours.',
-      reportId: report._id,
-    });
+    res.json({ success: true, message: 'Report submitted successfully. We will review within 24 hours.', reportId: report._id });
   } catch (error) {
     console.error('Report error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== EQUIPMENT ROUTES ====================
+// ==================== EQUIPMENT ====================
 app.get('/api/equipment', async (req, res) => {
   try {
     const { category, search } = req.query;
     const query = { 'availability.isAvailable': true, isActive: true };
     if (category && category !== 'all') query.category = category;
-    if (search) {
-      query.$or = [
-        { name:       { $regex: search, $options: 'i' } },
-        { teluguName: { $regex: search, $options: 'i' } },
-      ];
-    }
+    if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
     const equipment = await Equipment.find(query)
       .populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings')
-      .sort('-createdAt')
-      .limit(50);
+      .sort('-createdAt').limit(50);
     res.json({ success: true, equipment });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/equipment/:id', async (req, res) => {
@@ -724,70 +600,50 @@ app.get('/api/equipment/:id', async (req, res) => {
       .populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
     if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
     res.json({ success: true, equipment });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/equipment', authenticate, async (req, res) => {
   try {
     const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
     res.status(201).json({ success: true, equipment });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/equipment/:id', authenticate, async (req, res) => {
   try {
     const equipment = await Equipment.findById(req.params.id);
     if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
-    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
     Object.assign(equipment, req.body);
     await equipment.save();
     res.json({ success: true, equipment });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.delete('/api/equipment/:id', authenticate, async (req, res) => {
   try {
     const equipment = await Equipment.findById(req.params.id);
     if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
-    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
     await equipment.deleteOne();
     res.json({ success: true, message: 'Equipment deleted' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== PRODUCE ROUTES ====================
+// ==================== PRODUCE ====================
 app.get('/api/produce', async (req, res) => {
   try {
     const { crop, search, organic } = req.query;
     const query = { isAvailable: true, isActive: true };
     if (crop && crop !== 'all') query.cropName = crop;
-    if (search) {
-      query.$or = [
-        { cropName: { $regex: search, $options: 'i' } },
-        { variety:  { $regex: search, $options: 'i' } },
-      ];
-    }
+    if (search) query.$or = [{ cropName: { $regex: search, $options: 'i' } }, { variety: { $regex: search, $options: 'i' } }];
     if (organic === 'true') query.organic = true;
     const produce = await Produce.find(query)
       .populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings')
-      .sort('-createdAt')
-      .limit(50);
+      .sort('-createdAt').limit(50);
     res.json({ success: true, produce });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/produce/:id', async (req, res) => {
@@ -796,86 +652,210 @@ app.get('/api/produce/:id', async (req, res) => {
       .populate('farmerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
     if (!produce) return res.status(404).json({ error: 'Produce not found' });
     res.json({ success: true, produce });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/produce', authenticate, async (req, res) => {
   try {
     const produce = await Produce.create({ ...req.body, farmerId: req.user._id });
     res.status(201).json({ success: true, produce });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/produce/:id', authenticate, async (req, res) => {
   try {
     const produce = await Produce.findById(req.params.id);
     if (!produce) return res.status(404).json({ error: 'Produce not found' });
-    if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
     Object.assign(produce, req.body);
     await produce.save();
     res.json({ success: true, produce });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.delete('/api/produce/:id', authenticate, async (req, res) => {
   try {
     const produce = await Produce.findById(req.params.id);
     if (!produce) return res.status(404).json({ error: 'Produce not found' });
-    if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
     await produce.deleteOne();
     res.json({ success: true, message: 'Listing deleted' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== BOOKING ROUTES ====================
+// ==================== BOOKINGS ====================
 app.get('/api/bookings', authenticate, async (req, res) => {
   try {
-    const bookings = await Booking.find({
-      $or: [{ renterId: req.user._id }, { ownerId: req.user._id }],
-    }).sort('-createdAt');
+    const bookings = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }).sort('-createdAt');
     res.json({ success: true, bookings });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/bookings', authenticate, async (req, res) => {
   try {
     const booking = await Booking.create({ ...req.body, renterId: req.user._id });
     res.status(201).json({ success: true, booking });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/bookings/:id', authenticate, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id);
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
-    if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
     booking.status = req.body.status;
     await booking.save();
     res.json({ success: true, booking });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== DASHBOARD STATS ====================
+// ==================== PROBLEMS & SOLUTIONS ====================
+app.get('/api/problems', async (req, res) => {
+  try {
+    const { crop, search } = req.query;
+    const query = { isActive: true };
+    if (crop && crop !== 'all') query.cropType = crop;
+    if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
+    const problems = await Problem.find(query)
+      .populate('farmerId', 'profile.name profile.profileImage verification.isVerified')
+      .sort('-upvotes').limit(50);
+    res.json({ success: true, problems });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/problems/:id', async (req, res) => {
+  try {
+    const problem = await Problem.findById(req.params.id)
+      .populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings');
+    if (!problem) return res.status(404).json({ error: 'Problem not found' });
+    const solutions = await Solution.find({ problemId: problem._id, isActive: true })
+      .populate('farmerId', 'profile.name profile.profileImage verification.isVerified')
+      .sort('-upvotes');
+    res.json({ success: true, problem, solutions });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/problems', authenticate, async (req, res) => {
+  try {
+    const problem = await Problem.create({ ...req.body, farmerId: req.user._id });
+    res.status(201).json({ success: true, problem });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/problems/:id/solutions', authenticate, async (req, res) => {
+  try {
+    const solution = await Solution.create({
+      problemId:      req.params.id,
+      farmerId:       req.user._id,
+      solution:       req.body.solution,
+      teluguSolution: req.body.teluguSolution,
+      mediaUrl:       req.body.mediaUrl,
+      mediaType:      req.body.mediaType,
+    });
+    await Problem.findByIdAndUpdate(req.params.id, { $inc: { solutionCount: 1 } });
+    res.status(201).json({ success: true, solution });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
+  try {
+    const problem = await Problem.findById(req.params.id);
+    if (!problem) return res.status(404).json({ error: 'Problem not found' });
+    const hasUpvoted = problem.upvotedBy.includes(req.user._id);
+    if (hasUpvoted) {
+      problem.upvotes -= 1;
+      problem.upvotedBy = problem.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
+    } else {
+      problem.upvotes += 1;
+      problem.upvotedBy.push(req.user._id);
+    }
+    await problem.save();
+    res.json({ success: true, upvotes: problem.upvotes, hasUpvoted: !hasUpvoted });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
+  try {
+    const solution = await Solution.findById(req.params.id);
+    if (!solution) return res.status(404).json({ error: 'Solution not found' });
+    const hasUpvoted = solution.upvotedBy.includes(req.user._id);
+    if (hasUpvoted) {
+      solution.upvotes -= 1;
+      solution.upvotedBy = solution.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
+    } else {
+      solution.upvotes += 1;
+      solution.upvotedBy.push(req.user._id);
+    }
+    await solution.save();
+    res.json({ success: true, upvotes: solution.upvotes, hasUpvoted: !hasUpvoted });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ==================== LABOURERS ====================
+app.get('/api/labourers/nearby', async (req, res) => {
+  try {
+    const { lat, lng, radius = 10, crop } = req.query;
+    const query = { role: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
+    if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
+    let labourers = await User.find(query)
+      .select('profile labourerDetails ratings verification email')
+      .sort('-ratings.average').limit(50);
+    if (lat && lng) {
+      labourers = labourers
+        .map(lab => ({ ...lab.toObject(), distance: calculateDistance(lat, lng, lab.profile.location?.lat, lab.profile.location?.lng) }))
+        .filter(lab => lab.distance <= Number(radius))
+        .sort((a, b) => a.distance - b.distance);
+    }
+    res.json({ success: true, labourers });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/labourers', async (req, res) => {
+  try {
+    const { crop, isAvailable } = req.query;
+    const query = { role: 'labourer', isActive: true };
+    if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
+    if (isAvailable !== undefined) query['labourerDetails.isAvailable'] = isAvailable === 'true';
+    const labourers = await User.find(query)
+      .select('profile labourerDetails ratings verification email')
+      .sort('-ratings.average').limit(100);
+    res.json({ success: true, labourers });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/labourers/:id', async (req, res) => {
+  try {
+    const labourer = await User.findOne({ _id: req.params.id, role: 'labourer' })
+      .select('profile labourerDetails ratings verification email');
+    if (!labourer) return res.status(404).json({ error: 'Labourer not found' });
+    res.json({ success: true, labourer });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ==================== CONTRACTORS ====================
+app.get('/api/contractors', async (req, res) => {
+  try {
+    const { crop, isActive } = req.query;
+    const query = { role: 'contractor', isActive: true };
+    if (crop && crop !== 'all') query['contractorDetails.crops'] = crop;
+    if (isActive !== undefined) query['contractorDetails.isActive'] = isActive === 'true';
+    const contractors = await User.find(query)
+      .select('profile contractorDetails ratings verification email')
+      .sort('-ratings.average').limit(100);
+    res.json({ success: true, contractors });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/contractors/:id', async (req, res) => {
+  try {
+    const contractor = await User.findOne({ _id: req.params.id, role: 'contractor' })
+      .select('profile contractorDetails ratings verification email');
+    if (!contractor) return res.status(404).json({ error: 'Contractor not found' });
+    res.json({ success: true, contractor });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ==================== DASHBOARD ====================
 app.get('/api/dashboard/stats', authenticate, async (req, res) => {
   try {
     const [equipmentCount, produceCount, bookingsAsRenter, bookingsAsOwner] = await Promise.all([
@@ -884,18 +864,8 @@ app.get('/api/dashboard/stats', authenticate, async (req, res) => {
       Booking.countDocuments({ renterId: req.user._id }),
       Booking.countDocuments({ ownerId: req.user._id }),
     ]);
-    res.json({
-      success: true,
-      stats: {
-        equipmentListed:   equipmentCount,
-        produceListed:     produceCount,
-        bookingsMade:      bookingsAsRenter,
-        bookingsReceived:  bookingsAsOwner,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+    res.json({ success: true, stats: { equipmentListed: equipmentCount, produceListed: produceCount, bookingsMade: bookingsAsRenter, bookingsReceived: bookingsAsOwner } });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==================== 404 / ERROR HANDLERS ====================
