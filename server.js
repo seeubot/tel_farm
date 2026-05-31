@@ -399,7 +399,14 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to fetch user info from Google')}`);
     }
 
-    let user = await User.findOne({ email: googleUser.email });
+    // Fix: Validate Google ID before proceeding
+    if (!googleUser.sub) {
+      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Invalid Google ID')}`);
+    }
+
+    // Fix: Find by email OR googleId to prevent duplicates
+    let user = await User.findOne({ $or: [{ email: googleUser.email }, { googleId: googleUser.sub }] });
+
     if (!user) {
       console.log('[Auth Callback] Creating new user...');
       user = await User.create({
@@ -409,10 +416,14 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
         verification: { isVerified: false },
         ageVerified: false,
       });
-      console.log('[Auth Callback] User created:', user._id);
+      console.log('✅ New user created from mobile:', user.email);
     } else {
       console.log('[Auth Callback] User found:', user._id);
-      if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
+      // Fix: Update existing user with googleId if missing
+      if (!user.googleId) {
+        user.googleId = googleUser.sub;
+        await user.save();
+      }
     }
 
     const appToken = jwt.sign(
@@ -435,17 +446,40 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
 app.post('/api/auth/google', async (req, res) => {
   try {
     const { email, name, picture, googleId } = req.body;
-    let user = await User.findOne({ email });
+
+    // Fix: Validate googleId is present
+    if (!googleId) {
+      return res.status(400).json({ error: 'Invalid Google ID' });
+    }
+
+    // Fix: Find by email OR googleId to prevent duplicates
+    let user = await User.findOne({ $or: [{ email }, { googleId }] });
+
     if (!user) {
       user = await User.create({
-        firebaseUid: googleId,
-        email,
-        profile: { name, profileImage: picture },
+        googleId: googleId,
+        email:    email,
+        profile: {
+          name:         name,
+          profileImage: picture,
+        },
         verification: { isVerified: false },
         ageVerified: false,
       });
+      console.log('✅ New user created:', user.email);
     }
-    res.json({ success: true, user: { id: user._id, email: user.email, role: user.role, profile: user.profile, verification: user.verification, ageVerified: user.ageVerified } });
+
+    res.json({
+      success: true,
+      user: {
+        id:           user._id,
+        email:        user.email,
+        role:         user.role,
+        profile:      user.profile,
+        verification: user.verification,
+        ageVerified:  user.ageVerified,
+      },
+    });
   } catch (error) {
     console.error('Google auth error:', error);
     res.status(500).json({ error: error.message });
