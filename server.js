@@ -238,13 +238,51 @@ const solutionSchema = new mongoose.Schema({
   createdAt:      { type: Date, default: Date.now },
 });
 
-const User      = mongoose.model('User',      userSchema);
-const Equipment = mongoose.model('Equipment', equipmentSchema);
-const Produce   = mongoose.model('Produce',   produceSchema);
-const Booking   = mongoose.model('Booking',   bookingSchema);
-const Report    = mongoose.model('Report',    reportSchema);
-const Problem   = mongoose.model('Problem',   problemSchema);
-const Solution  = mongoose.model('Solution',  solutionSchema);
+// ==================== FERTILIZER SHOP MODEL ====================
+const fertilizerShopSchema = new mongoose.Schema({
+  name:           { type: String, required: true },
+  teluguName:     { type: String },
+  ownerName:      { type: String, required: true },
+  phone:          { type: String, required: true },
+  alternatePhone: { type: String },
+  email:          { type: String },
+  location: {
+    lat:     { type: Number, required: true },
+    lng:     { type: Number, required: true },
+    address: { type: String, required: true },
+    village: { type: String },
+    district: { type: String },
+    pincode: { type: String },
+  },
+  timings: {
+    opening:  { type: String, default: '09:00 AM' },
+    closing:  { type: String, default: '08:00 PM' },
+    closedOn: { type: String, default: 'Sunday' },
+  },
+  products: [{
+    name:     { type: String },
+    category: { type: String, enum: ['fertilizer', 'pesticide', 'seed', 'equipment', 'other'] },
+    price:    { type: Number },
+    inStock:  { type: Boolean, default: true },
+  }],
+  services:     [{ type: String }],
+  rating:       { type: Number, default: 0 },
+  totalRatings: { type: Number, default: 0 },
+  isVerified:   { type: Boolean, default: false },
+  isActive:     { type: Boolean, default: true },
+  addedBy:      { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdAt:    { type: Date, default: Date.now },
+  updatedAt:    { type: Date, default: Date.now },
+});
+
+const User            = mongoose.model('User',            userSchema);
+const Equipment       = mongoose.model('Equipment',       equipmentSchema);
+const Produce         = mongoose.model('Produce',         produceSchema);
+const Booking         = mongoose.model('Booking',         bookingSchema);
+const Report          = mongoose.model('Report',          reportSchema);
+const Problem         = mongoose.model('Problem',         problemSchema);
+const Solution        = mongoose.model('Solution',        solutionSchema);
+const FertilizerShop  = mongoose.model('FertilizerShop',  fertilizerShopSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -347,18 +385,19 @@ app.get('/', (req, res) => {
     version: '1.0.0',
     status: 'active',
     endpoints: {
-      health:      'GET /health',
-      auth:        'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/google-mobile/callback, GET /api/auth/me, PUT /api/auth/role, PUT /api/auth/profile, POST /api/auth/verify-age, GET /api/auth/session',
-      equipment:   'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
-      produce:     'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
-      bookings:    'GET,POST /api/bookings, PUT /api/bookings/:id',
-      users:       'DELETE /api/users/delete-account, GET /api/users/export-data',
-      reports:     'POST /api/reports',
-      problems:    'GET,POST /api/problems, GET /api/problems/:id, POST /api/problems/:id/solutions, POST /api/problems/:id/upvote',
-      solutions:   'POST /api/solutions/:id/upvote',
-      labourers:   'GET /api/labourers, GET /api/labourers/nearby, GET /api/labourers/:id',
-      contractors: 'GET /api/contractors, GET /api/contractors/:id',
-      dashboard:   'GET /api/dashboard/stats',
+      health:            'GET /health',
+      auth:              'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/google-mobile/callback, GET /api/auth/me, PUT /api/auth/role, PUT /api/auth/profile, POST /api/auth/verify-age, GET /api/auth/session',
+      equipment:         'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
+      produce:           'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
+      bookings:          'GET,POST /api/bookings, PUT /api/bookings/:id',
+      users:             'DELETE /api/users/delete-account, GET /api/users/export-data',
+      reports:           'POST /api/reports',
+      problems:          'GET,POST /api/problems, GET /api/problems/:id, POST /api/problems/:id/solutions, POST /api/problems/:id/upvote',
+      solutions:         'POST /api/solutions/:id/upvote',
+      labourers:         'GET /api/labourers, GET /api/labourers/nearby, GET /api/labourers/:id',
+      contractors:       'GET /api/contractors, GET /api/contractors/:id',
+      dashboard:         'GET /api/dashboard/stats',
+      fertilizerShops:   'GET /api/fertilizer-shops/nearby, GET /api/fertilizer-shops/my-shops, GET,POST /api/fertilizer-shops, GET,PUT,DELETE /api/fertilizer-shops/:id, POST /api/fertilizer-shops/:id/rate',
     },
   });
 });
@@ -399,12 +438,10 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to fetch user info from Google')}`);
     }
 
-    // Fix: Validate Google ID before proceeding
     if (!googleUser.sub) {
       return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Invalid Google ID')}`);
     }
 
-    // Fix: Find by email OR googleId to prevent duplicates
     let user = await User.findOne({ $or: [{ email: googleUser.email }, { googleId: googleUser.sub }] });
 
     if (!user) {
@@ -419,7 +456,6 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       console.log('✅ New user created from mobile:', user.email);
     } else {
       console.log('[Auth Callback] User found:', user._id);
-      // Fix: Update existing user with googleId if missing
       if (!user.googleId) {
         user.googleId = googleUser.sub;
         await user.save();
@@ -447,12 +483,10 @@ app.post('/api/auth/google', async (req, res) => {
   try {
     const { email, name, picture, googleId } = req.body;
 
-    // Fix: Validate googleId is present
     if (!googleId) {
       return res.status(400).json({ error: 'Invalid Google ID' });
     }
 
-    // Fix: Find by email OR googleId to prevent duplicates
     let user = await User.findOne({ $or: [{ email }, { googleId }] });
 
     if (!user) {
@@ -900,6 +934,158 @@ app.get('/api/dashboard/stats', authenticate, async (req, res) => {
     ]);
     res.json({ success: true, stats: { equipmentListed: equipmentCount, produceListed: produceCount, bookingsMade: bookingsAsRenter, bookingsReceived: bookingsAsOwner } });
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ==================== FERTILIZER SHOPS ====================
+
+// NOTE: /my-shops must be registered BEFORE /:id to avoid route conflict
+app.get('/api/fertilizer-shops/my-shops', authenticate, async (req, res) => {
+  try {
+    const shops = await FertilizerShop.find({ addedBy: req.user._id }).sort('-createdAt');
+    res.json({ success: true, shops });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get nearby fertilizer shops
+app.get('/api/fertilizer-shops/nearby', async (req, res) => {
+  try {
+    const { lat, lng, radius = 10, search } = req.query;
+
+    let query = { isActive: true };
+
+    if (search) {
+      query.$or = [
+        { name:              { $regex: search, $options: 'i' } },
+        { teluguName:        { $regex: search, $options: 'i' } },
+        { ownerName:         { $regex: search, $options: 'i' } },
+        { 'location.village':  { $regex: search, $options: 'i' } },
+        { 'location.district': { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    let shops = await FertilizerShop.find(query).sort('-isVerified').limit(100);
+
+    if (lat && lng) {
+      shops = shops.map(shop => ({
+        ...shop.toObject(),
+        distance: calculateDistance(parseFloat(lat), parseFloat(lng), shop.location.lat, shop.location.lng),
+      })).filter(shop => shop.distance <= parseFloat(radius));
+
+      shops.sort((a, b) => a.distance - b.distance);
+    }
+
+    res.json({ success: true, shops });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all fertilizer shops (with optional search/filter)
+app.get('/api/fertilizer-shops', async (req, res) => {
+  try {
+    const { search, district, isVerified } = req.query;
+
+    const query = { isActive: true };
+
+    if (search) {
+      query.$or = [
+        { name:              { $regex: search, $options: 'i' } },
+        { teluguName:        { $regex: search, $options: 'i' } },
+        { ownerName:         { $regex: search, $options: 'i' } },
+        { 'location.village':  { $regex: search, $options: 'i' } },
+        { 'location.district': { $regex: search, $options: 'i' } },
+      ];
+    }
+    if (district)   query['location.district'] = { $regex: district, $options: 'i' };
+    if (isVerified !== undefined) query.isVerified = isVerified === 'true';
+
+    const shops = await FertilizerShop.find(query).sort('-isVerified -rating').limit(100);
+    res.json({ success: true, shops });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get single shop
+app.get('/api/fertilizer-shops/:id', async (req, res) => {
+  try {
+    const shop = await FertilizerShop.findById(req.params.id);
+    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+    res.json({ success: true, shop });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Add new fertilizer shop (authenticated)
+app.post('/api/fertilizer-shops', authenticate, async (req, res) => {
+  try {
+    const shop = await FertilizerShop.create({
+      ...req.body,
+      addedBy: req.user._id,
+    });
+    res.status(201).json({ success: true, shop });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update shop (owner or admin only)
+app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
+  try {
+    const shop = await FertilizerShop.findById(req.params.id);
+    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+
+    if (shop.addedBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    Object.assign(shop, req.body);
+    shop.updatedAt = Date.now();
+    await shop.save();
+
+    res.json({ success: true, shop });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete shop (admin only)
+app.delete('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    await FertilizerShop.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Shop deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rate a shop
+app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
+  try {
+    const { rating } = req.body;
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    }
+
+    const shop = await FertilizerShop.findById(req.params.id);
+    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+
+    const newRating = (shop.rating * shop.totalRatings + rating) / (shop.totalRatings + 1);
+    shop.rating = Math.round(newRating * 10) / 10;
+    shop.totalRatings += 1;
+    await shop.save();
+
+    res.json({ success: true, rating: shop.rating, totalRatings: shop.totalRatings });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ==================== 404 / ERROR HANDLERS ====================
