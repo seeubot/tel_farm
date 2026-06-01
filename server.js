@@ -275,6 +275,53 @@ const fertilizerShopSchema = new mongoose.Schema({
   updatedAt:    { type: Date, default: Date.now },
 });
 
+// ==================== AD MODEL ====================
+const adSchema = new mongoose.Schema({
+  title:           { type: String, required: true },
+  teluguTitle:     { type: String },
+  description:     { type: String },
+  advertiserId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  advertiserName:  { type: String },
+  advertiserPhone: { type: String },
+  type: {
+    type: String,
+    enum: ['banner', 'sponsored', 'featured', 'popup'],
+    default: 'banner',
+  },
+  placement: {
+    type: String,
+    enum: ['home', 'marketplace', 'equipment', 'solutions', 'all'],
+    default: 'home',
+  },
+  targetAudience: {
+    roles:    [{ type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'] }],
+    location: { type: String },
+    cropType: { type: String },
+  },
+  media: {
+    imageUrl:    { type: String },
+    videoUrl:    { type: String },
+    redirectUrl: { type: String },
+  },
+  budget:        { type: Number, required: true },
+  duration:      { type: Number, required: true }, // in days
+  impressions:   { type: Number, default: 0 },
+  clicks:        { type: Number, default: 0 },
+  ctr:           { type: Number, default: 0 },
+  status: {
+    type: String,
+    enum: ['pending', 'active', 'paused', 'completed', 'rejected'],
+    default: 'pending',
+  },
+  startDate:     { type: Date },
+  endDate:       { type: Date },
+  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  paymentId:     { type: String },
+  isActive:      { type: Boolean, default: true },
+  createdAt:     { type: Date, default: Date.now },
+  updatedAt:     { type: Date, default: Date.now },
+});
+
 const User            = mongoose.model('User',            userSchema);
 const Equipment       = mongoose.model('Equipment',       equipmentSchema);
 const Produce         = mongoose.model('Produce',         produceSchema);
@@ -283,6 +330,7 @@ const Report          = mongoose.model('Report',          reportSchema);
 const Problem         = mongoose.model('Problem',         problemSchema);
 const Solution        = mongoose.model('Solution',        solutionSchema);
 const FertilizerShop  = mongoose.model('FertilizerShop',  fertilizerShopSchema);
+const Ad              = mongoose.model('Ad',              adSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -398,6 +446,7 @@ app.get('/', (req, res) => {
       contractors:       'GET /api/contractors, GET /api/contractors/:id',
       dashboard:         'GET /api/dashboard/stats',
       fertilizerShops:   'GET /api/fertilizer-shops/nearby, GET /api/fertilizer-shops/my-shops, GET,POST /api/fertilizer-shops, GET,PUT,DELETE /api/fertilizer-shops/:id, POST /api/fertilizer-shops/:id/rate',
+      ads:               'GET /api/ads/active, GET /api/ads/my-ads, POST /api/ads, PUT /api/ads/:id/status, POST /api/ads/:id/click, GET /api/admin/ads',
     },
   });
 });
@@ -1083,6 +1132,114 @@ app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
     await shop.save();
 
     res.json({ success: true, rating: shop.rating, totalRatings: shop.totalRatings });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADS ====================
+
+// NOTE: /my-ads and /active must be registered BEFORE /:id to avoid route conflict
+app.get('/api/ads/my-ads', authenticate, async (req, res) => {
+  try {
+    const ads = await Ad.find({ advertiserId: req.user._id }).sort('-createdAt');
+    res.json({ success: true, ads });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get active ads for display
+app.get('/api/ads/active', async (req, res) => {
+  try {
+    const { placement, limit = 5 } = req.query;
+    const query = {
+      status: 'active',
+      isActive: true,
+      startDate: { $lte: new Date() },
+      endDate:   { $gte: new Date() },
+    };
+
+    if (placement && placement !== 'all') {
+      query.placement = { $in: [placement, 'all'] };
+    }
+
+    const ads = await Ad.find(query)
+      .sort('-createdAt')
+      .limit(parseInt(limit));
+
+    // Update impression count
+    await Ad.updateMany(
+      { _id: { $in: ads.map(ad => ad._id) } },
+      { $inc: { impressions: 1 } }
+    );
+
+    res.json({ success: true, ads });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create new ad (authenticated)
+app.post('/api/ads', authenticate, async (req, res) => {
+  try {
+    const adData = {
+      ...req.body,
+      advertiserId:    req.user._id,
+      advertiserName:  req.user.profile?.name,
+      advertiserPhone: req.user.profile?.phone,
+      startDate: new Date(),
+      endDate:   new Date(Date.now() + req.body.duration * 24 * 60 * 60 * 1000),
+    };
+
+    const ad = await Ad.create(adData);
+    res.status(201).json({ success: true, ad });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update ad status (owner or admin)
+app.put('/api/ads/:id/status', authenticate, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const ad = await Ad.findById(req.params.id);
+
+    if (!ad) return res.status(404).json({ error: 'Ad not found' });
+
+    if (ad.advertiserId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    ad.status = status;
+    ad.updatedAt = Date.now();
+    await ad.save();
+
+    res.json({ success: true, ad });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Track ad click
+app.post('/api/ads/:id/click', async (req, res) => {
+  try {
+    await Ad.findByIdAndUpdate(req.params.id, { $inc: { clicks: 1 } });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Get all ads
+app.get('/api/admin/ads', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const ads = await Ad.find().sort('-createdAt').populate('advertiserId', 'profile.name email');
+    res.json({ success: true, ads });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
