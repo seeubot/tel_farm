@@ -275,7 +275,7 @@ const fertilizerShopSchema = new mongoose.Schema({
   updatedAt:    { type: Date, default: Date.now },
 });
 
-// ==================== AD MODEL ====================
+// ==================== AD MODEL (UPDATED PLACEMENT ARCHITECTURE) ====================
 const adSchema = new mongoose.Schema({
   title:           { type: String, required: true },
   teluguTitle:     { type: String },
@@ -285,12 +285,12 @@ const adSchema = new mongoose.Schema({
   advertiserPhone: { type: String },
   type: {
     type: String,
-    enum: ['banner', 'sponsored', 'featured', 'popup'],
+    enum: ['banner', 'sponsored', 'featured'], // Removed 'popup'
     default: 'banner',
   },
   placement: {
     type: String,
-    enum: ['home', 'marketplace', 'equipment', 'solutions', 'all'],
+    enum: ['home', 'home_premium', 'marketplace', 'equipment', 'solutions', 'all'], // Added 'home_premium' layout map hook
     default: 'home',
   },
   targetAudience: {
@@ -738,16 +738,6 @@ app.put('/api/equipment/:id', authenticate, async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.delete('/api/equipment/:id', authenticate, async (req, res) => {
-  try {
-    const equipment = await Equipment.findById(req.params.id);
-    if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
-    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    await equipment.deleteOne();
-    res.json({ success: true, message: 'Equipment deleted' });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
 // ==================== PRODUCE ====================
 app.get('/api/produce', async (req, res) => {
   try {
@@ -986,8 +976,6 @@ app.get('/api/dashboard/stats', authenticate, async (req, res) => {
 });
 
 // ==================== FERTILIZER SHOPS ====================
-
-// NOTE: /my-shops must be registered BEFORE /:id to avoid route conflict
 app.get('/api/fertilizer-shops/my-shops', authenticate, async (req, res) => {
   try {
     const shops = await FertilizerShop.find({ addedBy: req.user._id }).sort('-createdAt');
@@ -997,11 +985,9 @@ app.get('/api/fertilizer-shops/my-shops', authenticate, async (req, res) => {
   }
 });
 
-// Get nearby fertilizer shops
 app.get('/api/fertilizer-shops/nearby', async (req, res) => {
   try {
     const { lat, lng, radius = 10, search } = req.query;
-
     let query = { isActive: true };
 
     if (search) {
@@ -1031,11 +1017,9 @@ app.get('/api/fertilizer-shops/nearby', async (req, res) => {
   }
 });
 
-// Get all fertilizer shops (with optional search/filter)
 app.get('/api/fertilizer-shops', async (req, res) => {
   try {
     const { search, district, isVerified } = req.query;
-
     const query = { isActive: true };
 
     if (search) {
@@ -1057,7 +1041,6 @@ app.get('/api/fertilizer-shops', async (req, res) => {
   }
 });
 
-// Get single shop
 app.get('/api/fertilizer-shops/:id', async (req, res) => {
   try {
     const shop = await FertilizerShop.findById(req.params.id);
@@ -1068,7 +1051,6 @@ app.get('/api/fertilizer-shops/:id', async (req, res) => {
   }
 });
 
-// Add new fertilizer shop (authenticated)
 app.post('/api/fertilizer-shops', authenticate, async (req, res) => {
   try {
     const shop = await FertilizerShop.create({
@@ -1081,7 +1063,6 @@ app.post('/api/fertilizer-shops', authenticate, async (req, res) => {
   }
 });
 
-// Update shop (owner or admin only)
 app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   try {
     const shop = await FertilizerShop.findById(req.params.id);
@@ -1101,7 +1082,6 @@ app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   }
 });
 
-// Delete shop (admin only)
 app.delete('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -1115,7 +1095,6 @@ app.delete('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   }
 });
 
-// Rate a shop
 app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
   try {
     const { rating } = req.body;
@@ -1138,8 +1117,6 @@ app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
 });
 
 // ==================== ADS ====================
-
-// NOTE: /my-ads and /active must be registered BEFORE /:id to avoid route conflict
 app.get('/api/ads/my-ads', authenticate, async (req, res) => {
   try {
     const ads = await Ad.find({ advertiserId: req.user._id }).sort('-createdAt');
@@ -1149,7 +1126,6 @@ app.get('/api/ads/my-ads', authenticate, async (req, res) => {
   }
 });
 
-// Get active ads for display
 app.get('/api/ads/active', async (req, res) => {
   try {
     const { placement, limit = 5 } = req.query;
@@ -1168,7 +1144,6 @@ app.get('/api/ads/active', async (req, res) => {
       .sort('-createdAt')
       .limit(parseInt(limit));
 
-    // Update impression count
     await Ad.updateMany(
       { _id: { $in: ads.map(ad => ad._id) } },
       { $inc: { impressions: 1 } }
@@ -1180,7 +1155,6 @@ app.get('/api/ads/active', async (req, res) => {
   }
 });
 
-// Create new ad (authenticated)
 app.post('/api/ads', authenticate, async (req, res) => {
   try {
     const adData = {
@@ -1199,7 +1173,6 @@ app.post('/api/ads', authenticate, async (req, res) => {
   }
 });
 
-// Update ad status (owner or admin)
 app.put('/api/ads/:id/status', authenticate, async (req, res) => {
   try {
     const { status } = req.body;
@@ -1221,7 +1194,6 @@ app.put('/api/ads/:id/status', authenticate, async (req, res) => {
   }
 });
 
-// Track ad click
 app.post('/api/ads/:id/click', async (req, res) => {
   try {
     await Ad.findByIdAndUpdate(req.params.id, { $inc: { clicks: 1 } });
@@ -1231,7 +1203,6 @@ app.post('/api/ads/:id/click', async (req, res) => {
   }
 });
 
-// Admin: Get all ads
 app.get('/api/admin/ads', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
