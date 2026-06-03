@@ -1076,6 +1076,43 @@ app.get('/api/payments/history', authenticate, async (req, res) => {
   res.json({ success: true, payments });
 });
 
+// ==================== GET UPI QR CODE IMAGE ====================
+app.get('/api/payments/upi-qr', async (req, res) => {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+
+    // Path to QR code image on server
+    const qrPath = path.join(__dirname, 'assets', 'Agri Ads.png');
+
+    if (fs.existsSync(qrPath)) {
+      const qrImage = fs.readFileSync(qrPath);
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.send(qrImage);
+    } else {
+      // Fallback: generate QR via API
+      const upiId = process.env.MERCHANT_UPI_ID || 'agriagent@upi';
+      const merchantName = process.env.MERCHANT_NAME || 'AgriAgent';
+      const upiUri = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(merchantName)}&cu=INR`;
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(upiUri)}`;
+
+      res.redirect(qrUrl);
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== GET UPI DETAILS ====================
+app.get('/api/payments/upi-details', async (req, res) => {
+  res.json({
+    success: true,
+    upiId: process.env.MERCHANT_UPI_ID || 'siddhikreddy@ibl',
+    merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies',
+  });
+});
+
 // ==================== 404 / ERROR HANDLERS ====================
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.url} not found` });
