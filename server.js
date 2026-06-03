@@ -421,77 +421,58 @@ app.get('/api/config/upi', (req, res) => {
 });
 
 // ==================== CATBOX UPLOAD ====================
-// ==================== CATBOX UPLOAD (FIXED) ====================
 app.post('/api/upload/catbox', authenticate, upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file provided' });
-    }
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
     console.log('📤 Uploading to Catbox:', {
       filename: req.file.originalname,
-      size: req.file.size,
+      size:     req.file.size,
       mimetype: req.file.mimetype,
     });
-    // Use axios with proper form-data
+
     const FormDataLib = require('form-data');
     const form = new FormDataLib();
 
-    // Append as buffer with proper options
+    // reqtype MUST come before fileToUpload
     form.append('reqtype', 'fileupload');
     form.append('fileToUpload', req.file.buffer, {
-      filename: req.file.originalname || `upload_${Date.now()}.jpg`,
+      filename:    req.file.originalname || `upload_${Date.now()}.jpg`,
       contentType: req.file.mimetype || 'image/jpeg',
       knownLength: req.file.size,
     });
-    // Get headers from form-data
-    const headers = form.getHeaders();
-    // Upload to Catbox
-    const response = await axios.post('https://catbox.moe/user/api.php', form, {
-      headers: headers,
-      timeout: 60000,
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    });
-    console.log('📥 Catbox response:', response.data);
-    // Catbox returns plain text URL on success
-    if (response.data && typeof response.data === 'string' && response.data.startsWith('http')) {
-      res.json({
-        success: true,
-        url: response.data.trim(),
-      });
-    } else {
-      console.error('❌ Catbox unexpected response:', response.data);
-      res.status(500).json({ error: 'Upload failed: Unexpected response from Catbox' });
-    }
-  } catch (error) {
-    console.error('❌ Upload error:', error.message);
 
-    // Try alternative: use fetch
-    try {
-      console.log('🔄 Trying alternative upload method...');
-      const FormDataLib = require('form-data');
-      const form = new FormDataLib();
-      form.append('reqtype', 'fileupload');
-      form.append('fileToUpload', req.file.buffer, {
-        filename: 'upload.jpg',
-        contentType: 'image/jpeg',
-      });
-      const fetchResponse = await fetch('https://catbox.moe/user/api.php', {
-        method: 'POST',
-        body: form,
-        headers: form.getHeaders(),
-      });
-      const text = await fetchResponse.text();
-      console.log('📥 Alternative response:', text);
-      if (text && text.startsWith('http')) {
-        res.json({ success: true, url: text.trim() });
-      } else {
-        res.status(500).json({ error: 'Upload failed: ' + text });
-      }
-    } catch (retryError) {
-      console.error('❌ Alternative also failed:', retryError.message);
-      res.status(500).json({ error: 'Upload failed: ' + error.message });
+    // Provide exact Content-Length so Catbox doesn't reject chunked bodies
+    const contentLength = await new Promise((resolve, reject) =>
+      form.getLength((err, len) => err ? reject(err) : resolve(len))
+    );
+
+    const response = await axios.post('https://catbox.moe/user/api.php', form, {
+      headers: {
+        ...form.getHeaders(),
+        'Content-Length': contentLength,
+      },
+      timeout:          60000,
+      maxContentLength: Infinity,
+      maxBodyLength:    Infinity,
+    });
+
+    console.log('📥 Catbox response:', response.status, JSON.stringify(response.data));
+
+    const result = typeof response.data === 'string' ? response.data.trim() : String(response.data).trim();
+    if (result.startsWith('http')) {
+      return res.json({ success: true, url: result });
     }
+
+    console.error('❌ Catbox unexpected response:', response.data);
+    return res.status(500).json({ error: `Upload failed: ${result}` });
+
+  } catch (error) {
+    const status = error.response?.status;
+    const body   = error.response?.data;
+    const msg    = error.message;
+    console.error('❌ Catbox upload error:', { msg, status, body });
+    return res.status(500).json({ error: `Upload failed: ${body || msg}` });
   }
 });
 
