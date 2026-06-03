@@ -1110,6 +1110,7 @@ app.get('/api/payments/upi-details', async (req, res) => {
     success: true,
     upiId: process.env.MERCHANT_UPI_ID || 'siddhikreddy@ibl',
     merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies',
+    qrCodeUrl: process.env.QR_CODE_URL || '',
   });
 });
 
