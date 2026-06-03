@@ -331,7 +331,7 @@ const adSchema = new mongoose.Schema({
   },
   startDate:     { type: Date },
   endDate:       { type: Date },
-  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  paymentStatus: { type: String, enum: ['pending', 'pending_verification', 'completed', 'failed'], default: 'pending' },
   paymentId:     { type: String },
   isActive:      { type: Boolean, default: true },
   createdAt:     { type: Date, default: Date.now },
@@ -350,11 +350,14 @@ const paymentSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'completed', 'failed', 'refunded'],
+    enum: ['pending', 'pending_verification', 'completed', 'failed', 'refunded'],
     default: 'pending',
   },
   transactionId: { type: String },
   upiTransactionId: { type: String },
+  utrNumber: { type: String },
+  userConfirmed: { type: Boolean, default: false },
+  userConfirmedAt: { type: Date },
   paymentDetails: {
     upiId: { type: String },
     cardLast4: { type: String },
@@ -1112,6 +1115,45 @@ app.get('/api/payments/upi-details', async (req, res) => {
     merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies',
     qrCodeUrl: process.env.QR_CODE_URL || '',
   });
+});
+
+// ==================== SUBMIT PAYMENT WITH UTR ====================
+app.post('/api/payments/confirm-payment', authenticate, async (req, res) => {
+  try {
+    const { adId, paymentId, utrNumber } = req.body;
+    if (!adId) return res.status(400).json({ error: 'Ad ID required' });
+    if (!utrNumber) return res.status(400).json({ error: 'UTR number required' });
+
+    // Find the payment
+    const payment = await Payment.findOne({ adId, userId: req.user._id });
+    
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment record not found' });
+    }
+
+    // Save UTR and mark as pending verification
+    payment.utrNumber = utrNumber;
+    payment.status = 'pending_verification';
+    payment.userConfirmed = true;
+    payment.userConfirmedAt = new Date();
+    payment.updatedAt = new Date();
+    await payment.save();
+
+    // Update ad status
+    await Ad.findByIdAndUpdate(adId, {
+      paymentStatus: 'pending_verification',
+      updatedAt: new Date(),
+    });
+
+    console.log(`📢 Payment confirmation: User ${req.user.email} | UTR: ${utrNumber} | Amount: ₹${payment.amount}`);
+
+    res.json({
+      success: true,
+      message: 'Payment confirmation submitted with UTR. Admin will verify shortly.',
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ==================== 404 / ERROR HANDLERS ====================
