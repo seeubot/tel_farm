@@ -9,7 +9,6 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const FormData = require('form-data');
 const axios = require('axios');
-const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -65,13 +64,13 @@ app.use(express.urlencoded({ extended: true }));
 // Multer for file uploads
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP allowed.'), false);
+      cb(new Error('Invalid file type'), false);
     }
   },
 });
@@ -79,7 +78,7 @@ const upload = multer({
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  message: { error: 'Too many requests, please try again later.' },
+  message: { error: 'Too many requests' },
 });
 app.use('/api/', limiter);
 
@@ -109,10 +108,6 @@ const userSchema = new mongoose.Schema({
     isAadharVerified: { type: Boolean, default: false },
     isVerified:       { type: Boolean, default: false },
     verifiedAt:       Date,
-    documents: {
-      aadharUrl: String,
-      panUrl:    String,
-    },
   },
   labourerDetails: {
     age:         Number,
@@ -299,16 +294,8 @@ const adSchema = new mongoose.Schema({
   advertiserId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   advertiserName:  { type: String },
   advertiserPhone: { type: String },
-  type: {
-    type: String,
-    enum: ['banner', 'sponsored', 'featured'],
-    default: 'banner',
-  },
-  placement: {
-    type: String,
-    enum: ['home', 'home_premium', 'marketplace', 'equipment', 'solutions', 'all'],
-    default: 'home',
-  },
+  type:            { type: String, enum: ['banner', 'sponsored', 'featured'], default: 'banner' },
+  placement:       { type: String, enum: ['home', 'home_premium', 'marketplace', 'equipment', 'solutions', 'all'], default: 'home' },
   targetAudience: {
     roles:    [{ type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'] }],
     location: { type: String },
@@ -323,12 +310,7 @@ const adSchema = new mongoose.Schema({
   duration:      { type: Number, required: true },
   impressions:   { type: Number, default: 0 },
   clicks:        { type: Number, default: 0 },
-  ctr:           { type: Number, default: 0 },
-  status: {
-    type: String,
-    enum: ['pending', 'active', 'paused', 'completed', 'rejected'],
-    default: 'pending',
-  },
+  status:        { type: String, enum: ['pending', 'active', 'paused', 'completed', 'rejected'], default: 'pending' },
   startDate:     { type: Date },
   endDate:       { type: Date },
   paymentStatus: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
@@ -339,42 +321,26 @@ const adSchema = new mongoose.Schema({
 });
 
 const paymentSchema = new mongoose.Schema({
-  userId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  adId:        { type: mongoose.Schema.Types.ObjectId, ref: 'Ad', required: true },
-  amount:      { type: Number, required: true },
-  currency:    { type: String, default: 'INR' },
-  paymentMethod: {
-    type: String,
-    enum: ['upi', 'card', 'netbanking', 'razorpay'],
-    default: 'upi',
-  },
-  status: {
-    type: String,
-    enum: ['pending', 'completed', 'failed', 'refunded'],
-    default: 'pending',
-  },
-  transactionId: { type: String },
-  upiTransactionId: { type: String },
-  paymentDetails: {
-    upiId: { type: String },
-    cardLast4: { type: String },
-    bankName: { type: String },
-  },
-  paidAt: { type: Date },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
+  userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  adId:         { type: mongoose.Schema.Types.ObjectId, ref: 'Ad', required: true },
+  amount:       { type: Number, required: true },
+  paymentMethod: { type: String, default: 'upi' },
+  status:       { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  paidAt:       { type: Date },
+  createdAt:    { type: Date, default: Date.now },
+  updatedAt:    { type: Date, default: Date.now },
 });
 
-const User            = mongoose.model('User',            userSchema);
-const Equipment       = mongoose.model('Equipment',       equipmentSchema);
-const Produce         = mongoose.model('Produce',         produceSchema);
-const Booking         = mongoose.model('Booking',         bookingSchema);
-const Report          = mongoose.model('Report',          reportSchema);
-const Problem         = mongoose.model('Problem',         problemSchema);
-const Solution        = mongoose.model('Solution',        solutionSchema);
-const FertilizerShop  = mongoose.model('FertilizerShop',  fertilizerShopSchema);
-const Ad              = mongoose.model('Ad',              adSchema);
-const Payment         = mongoose.model('Payment',         paymentSchema);
+const User           = mongoose.model('User',           userSchema);
+const Equipment      = mongoose.model('Equipment',      equipmentSchema);
+const Produce        = mongoose.model('Produce',        produceSchema);
+const Booking        = mongoose.model('Booking',        bookingSchema);
+const Report         = mongoose.model('Report',         reportSchema);
+const Problem        = mongoose.model('Problem',        problemSchema);
+const Solution       = mongoose.model('Solution',       solutionSchema);
+const FertilizerShop = mongoose.model('FertilizerShop', fertilizerShopSchema);
+const Ad             = mongoose.model('Ad',             adSchema);
+const Payment        = mongoose.model('Payment',        paymentSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -408,9 +374,7 @@ const authenticate = async (req, res, next) => {
       const accessToken = rawToken.slice(7);
       const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
       const tokenInfo = await tokenInfoRes.json();
-      if (!tokenInfoRes.ok || tokenInfo.error) {
-        return res.status(401).json({ error: 'Invalid Google access token' });
-      }
+      if (!tokenInfoRes.ok || tokenInfo.error) return res.status(401).json({ error: 'Invalid Google token' });
       const user = await User.findOne({ email: tokenInfo.email });
       if (!user) return res.status(401).json({ error: 'User not found' });
       if (!user.isActive) return res.status(401).json({ error: 'Account deactivated' });
@@ -419,17 +383,13 @@ const authenticate = async (req, res, next) => {
     }
 
     if (!firebaseAdmin) return res.status(401).json({ error: 'Auth service not configured' });
-
     const decodedToken = await firebaseAdmin.auth().verifyIdToken(rawToken);
     let user = await User.findOne({ firebaseUid: decodedToken.uid });
     if (!user) {
       user = await User.create({
         firebaseUid: decodedToken.uid,
-        email:       decodedToken.email,
-        profile: {
-          name:         decodedToken.name || decodedToken.email.split('@')[0],
-          profileImage: decodedToken.picture,
-        },
+        email: decodedToken.email,
+        profile: { name: decodedToken.name || decodedToken.email.split('@')[0], profileImage: decodedToken.picture },
       });
     }
     if (!user.isActive) return res.status(401).json({ error: 'Account deactivated' });
@@ -447,18 +407,23 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
 };
+
+// ==================== CONFIG ENDPOINTS ====================
+app.get('/api/config/upi', (req, res) => {
+  res.json({
+    success: true,
+    upiId: process.env.MERCHANT_UPI_ID || 'agriagent@upi',
+    merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies',
+  });
+});
 
 // ==================== CATBOX UPLOAD ====================
 app.post('/api/upload/catbox', authenticate, upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file provided' });
-    }
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
     const form = new FormData();
     form.append('reqtype', 'fileupload');
@@ -476,7 +441,7 @@ app.post('/api/upload/catbox', authenticate, upload.single('file'), async (req, 
       console.log('✅ Catbox upload:', response.data);
       res.json({ success: true, url: response.data });
     } else {
-      res.status(500).json({ error: 'Upload failed: ' + response.data });
+      res.status(500).json({ error: 'Upload failed' });
     }
   } catch (error) {
     console.error('❌ Upload error:', error.message);
@@ -487,22 +452,11 @@ app.post('/api/upload/catbox', authenticate, upload.single('file'), async (req, 
 // ==================== HEALTH CHECK ====================
 app.get('/health', async (req, res) => {
   const dbStatus = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' }[mongoose.connection.readyState] || 'unknown';
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    mongodb: dbStatus,
-    firebase: !!firebaseAdmin,
-    environment: process.env.NODE_ENV || 'production',
-  });
+  res.json({ status: 'OK', timestamp: new Date().toISOString(), uptime: process.uptime(), mongodb: dbStatus, firebase: !!firebaseAdmin });
 });
 
 app.get('/', (req, res) => {
-  res.json({
-    message: 'AgriAgent API',
-    version: '1.0.0',
-    status: 'active',
-  });
+  res.json({ message: 'AgriAgent API', version: '1.0.0', status: 'active' });
 });
 
 // ==================== AUTH ROUTES ====================
@@ -524,27 +478,16 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
 
     let user = await User.findOne({ $or: [{ email: googleUser.email }, { googleId: googleUser.sub }] });
     if (!user) {
-      user = await User.create({
-        googleId: googleUser.sub,
-        email:    googleUser.email,
-        profile:  { name: googleUser.name, profileImage: googleUser.picture },
-        verification: { isVerified: false },
-        ageVerified: false,
-      });
-    } else {
-      if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
+      user = await User.create({ googleId: googleUser.sub, email: googleUser.email, profile: { name: googleUser.name, profileImage: googleUser.picture } });
+    } else if (!user.googleId) {
+      user.googleId = googleUser.sub;
+      await user.save();
     }
 
-    const appToken = jwt.sign(
-      { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET || 'agriagent-secret-key',
-      { expiresIn: '30d' }
-    );
-
+    const appToken = jwt.sign({ userId: user._id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'agriagent-secret-key', { expiresIn: '30d' });
     const params = new URLSearchParams({ token: appToken, userId: user._id.toString(), email: user.email, role: user.role });
     return res.redirect(302, `agriagent://auth?${params.toString()}`);
   } catch (error) {
-    console.error('[Auth] Error:', error);
     return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(error.message)}`);
   }
 });
@@ -554,30 +497,21 @@ app.post('/api/auth/google', async (req, res) => {
     const { email, name, picture, googleId } = req.body;
     if (!googleId) return res.status(400).json({ error: 'Invalid Google ID' });
     let user = await User.findOne({ $or: [{ email }, { googleId }] });
-    if (!user) {
-      user = await User.create({ googleId, email, profile: { name, profileImage: picture }, verification: { isVerified: false }, ageVerified: false });
-    }
-    res.json({ success: true, user: { id: user._id, email: user.email, role: user.role, profile: user.profile } });
+    if (!user) user = await User.create({ googleId, email, profile: { name, profileImage: picture } });
+    res.json({ success: true, user: { id: user._id, email: user.email, role: user.role } });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/auth/google-mobile', async (req, res) => {
   try {
     const { code, codeVerifier, redirectUri } = req.body;
-    if (!code || !codeVerifier || !redirectUri) return res.status(400).json({ error: 'Missing parameters' });
     googleOAuthClient.redirectUri = redirectUri;
     const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier });
-    if (!tokens.access_token) return res.status(400).json({ error: 'Failed to obtain token' });
-    const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { Authorization: `Bearer ${tokens.access_token}` },
-    });
+    const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
     const googleUser = await userInfoRes.json();
     let user = await User.findOne({ email: googleUser.email });
-    if (!user) {
-      user = await User.create({ googleId: googleUser.sub, email: googleUser.email, profile: { name: googleUser.name, profileImage: googleUser.picture }, verification: { isVerified: false }, ageVerified: false });
-    } else {
-      if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
-    }
+    if (!user) user = await User.create({ googleId: googleUser.sub, email: googleUser.email, profile: { name: googleUser.name, profileImage: googleUser.picture } });
+    else if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
     res.json({ success: true, idToken: tokens.access_token, user: { id: user._id, email: user.email, role: user.role } });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -595,7 +529,7 @@ app.put('/api/auth/role', authenticate, async (req, res) => {
   if (!['farmer', 'labourer', 'contractor', 'buyer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
   req.user.role = role;
   await req.user.save();
-  res.json({ success: true, role: req.user.role });
+  res.json({ success: true });
 });
 
 app.put('/api/auth/profile', authenticate, async (req, res) => {
@@ -608,7 +542,7 @@ app.put('/api/auth/profile', authenticate, async (req, res) => {
   if (contractorDetails) req.user.contractorDetails = contractorDetails;
   req.user.updatedAt = Date.now();
   await req.user.save();
-  res.json({ success: true, user: req.user });
+  res.json({ success: true });
 });
 
 app.post('/api/auth/verify-age', authenticate, async (req, res) => {
@@ -623,25 +557,7 @@ app.post('/api/auth/verify-age', authenticate, async (req, res) => {
 // ==================== USER MANAGEMENT ====================
 app.delete('/api/users/delete-account', authenticate, async (req, res) => {
   await User.findByIdAndUpdate(req.user._id, { isActive: false, deletedAt: new Date() });
-  res.json({ success: true, message: 'Account deleted' });
-});
-
-app.get('/api/users/export-data', authenticate, async (req, res) => {
-  const [user, equipment, produce, bookings] = await Promise.all([
-    User.findById(req.user._id).select('-__v'),
-    Equipment.find({ ownerId: req.user._id }),
-    Produce.find({ farmerId: req.user._id }),
-    Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }),
-  ]);
-  res.json({ success: true, data: { user, equipment, produce, bookings } });
-});
-
-// ==================== REPORTS ====================
-app.post('/api/reports', authenticate, async (req, res) => {
-  const { type, targetId, reason, description } = req.body;
-  if (!['user', 'equipment', 'produce'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
-  const report = await Report.create({ reporterId: req.user._id, type, targetId, reason, description });
-  res.json({ success: true, reportId: report._id });
+  res.json({ success: true });
 });
 
 // ==================== EQUIPMENT ====================
@@ -649,7 +565,7 @@ app.get('/api/equipment', async (req, res) => {
   const { category, search } = req.query;
   const query = { 'availability.isAvailable': true, isActive: true };
   if (category && category !== 'all') query.category = category;
-  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
+  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }];
   const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
   res.json({ success: true, equipment });
 });
@@ -684,11 +600,10 @@ app.delete('/api/equipment/:id', authenticate, async (req, res) => {
 
 // ==================== PRODUCE ====================
 app.get('/api/produce', async (req, res) => {
-  const { crop, search, organic } = req.query;
+  const { crop, search } = req.query;
   const query = { isAvailable: true, isActive: true };
   if (crop && crop !== 'all') query.cropName = crop;
-  if (search) query.$or = [{ cropName: { $regex: search, $options: 'i' } }, { variety: { $regex: search, $options: 'i' } }];
-  if (organic === 'true') query.organic = true;
+  if (search) query.$or = [{ cropName: { $regex: search, $options: 'i' } }];
   const produce = await Produce.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
   res.json({ success: true, produce });
 });
@@ -702,23 +617,6 @@ app.get('/api/produce/:id', async (req, res) => {
 app.post('/api/produce', authenticate, async (req, res) => {
   const produce = await Produce.create({ ...req.body, farmerId: req.user._id });
   res.status(201).json({ success: true, produce });
-});
-
-app.put('/api/produce/:id', authenticate, async (req, res) => {
-  const produce = await Produce.findById(req.params.id);
-  if (!produce) return res.status(404).json({ error: 'Not found' });
-  if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  Object.assign(produce, req.body);
-  await produce.save();
-  res.json({ success: true, produce });
-});
-
-app.delete('/api/produce/:id', authenticate, async (req, res) => {
-  const produce = await Produce.findById(req.params.id);
-  if (!produce) return res.status(404).json({ error: 'Not found' });
-  if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  await produce.deleteOne();
-  res.json({ success: true });
 });
 
 // ==================== BOOKINGS ====================
@@ -746,7 +644,7 @@ app.get('/api/problems', async (req, res) => {
   const { crop, search } = req.query;
   const query = { isActive: true };
   if (crop && crop !== 'all') query.cropType = crop;
-  if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
+  if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }];
   const problems = await Problem.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes').limit(50);
   res.json({ success: true, problems });
 });
@@ -773,30 +671,20 @@ app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
   const problem = await Problem.findById(req.params.id);
   if (!problem) return res.status(404).json({ error: 'Not found' });
   const hasUpvoted = problem.upvotedBy.includes(req.user._id);
-  if (hasUpvoted) {
-    problem.upvotes -= 1;
-    problem.upvotedBy = problem.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
-  } else {
-    problem.upvotes += 1;
-    problem.upvotedBy.push(req.user._id);
-  }
+  if (hasUpvoted) { problem.upvotes -= 1; problem.upvotedBy.pull(req.user._id); }
+  else { problem.upvotes += 1; problem.upvotedBy.push(req.user._id); }
   await problem.save();
-  res.json({ success: true, upvotes: problem.upvotes, hasUpvoted: !hasUpvoted });
+  res.json({ success: true, upvotes: problem.upvotes });
 });
 
 app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
   const solution = await Solution.findById(req.params.id);
   if (!solution) return res.status(404).json({ error: 'Not found' });
   const hasUpvoted = solution.upvotedBy.includes(req.user._id);
-  if (hasUpvoted) {
-    solution.upvotes -= 1;
-    solution.upvotedBy = solution.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
-  } else {
-    solution.upvotes += 1;
-    solution.upvotedBy.push(req.user._id);
-  }
+  if (hasUpvoted) { solution.upvotes -= 1; solution.upvotedBy.pull(req.user._id); }
+  else { solution.upvotes += 1; solution.upvotedBy.push(req.user._id); }
   await solution.save();
-  res.json({ success: true, upvotes: solution.upvotes, hasUpvoted: !hasUpvoted });
+  res.json({ success: true, upvotes: solution.upvotes });
 });
 
 // ==================== LABOURERS ====================
@@ -813,18 +701,11 @@ app.get('/api/labourers/nearby', async (req, res) => {
 });
 
 app.get('/api/labourers', async (req, res) => {
-  const { crop, isAvailable } = req.query;
+  const { crop } = req.query;
   const query = { role: 'labourer', isActive: true };
   if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
-  if (isAvailable !== undefined) query['labourerDetails.isAvailable'] = isAvailable === 'true';
   const labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(100);
   res.json({ success: true, labourers });
-});
-
-app.get('/api/labourers/:id', async (req, res) => {
-  const labourer = await User.findOne({ _id: req.params.id, role: 'labourer' }).select('profile labourerDetails ratings verification email');
-  if (!labourer) return res.status(404).json({ error: 'Not found' });
-  res.json({ success: true, labourer });
 });
 
 // ==================== CONTRACTORS ====================
@@ -836,34 +717,20 @@ app.get('/api/contractors', async (req, res) => {
   res.json({ success: true, contractors });
 });
 
-app.get('/api/contractors/:id', async (req, res) => {
-  const contractor = await User.findOne({ _id: req.params.id, role: 'contractor' }).select('profile contractorDetails ratings verification email');
-  if (!contractor) return res.status(404).json({ error: 'Not found' });
-  res.json({ success: true, contractor });
-});
-
 // ==================== DASHBOARD ====================
 app.get('/api/dashboard/stats', authenticate, async (req, res) => {
-  const [equipmentCount, produceCount, bookingsAsRenter, bookingsAsOwner] = await Promise.all([
+  const [equipmentCount, produceCount] = await Promise.all([
     Equipment.countDocuments({ ownerId: req.user._id }),
     Produce.countDocuments({ farmerId: req.user._id }),
-    Booking.countDocuments({ renterId: req.user._id }),
-    Booking.countDocuments({ ownerId: req.user._id }),
   ]);
-  res.json({ success: true, stats: { equipmentListed: equipmentCount, produceListed: produceCount, bookingsMade: bookingsAsRenter, bookingsReceived: bookingsAsOwner } });
+  res.json({ success: true, stats: { equipmentListed: equipmentCount, produceListed: produceCount } });
 });
 
 // ==================== FERTILIZER SHOPS ====================
 app.get('/api/fertilizer-shops/nearby', async (req, res) => {
   const { lat, lng, radius = 10, search } = req.query;
   let query = { isActive: true };
-  if (search) {
-    query.$or = [
-      { name: { $regex: search, $options: 'i' } },
-      { 'location.village': { $regex: search, $options: 'i' } },
-      { 'location.district': { $regex: search, $options: 'i' } },
-    ];
-  }
+  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { 'location.village': { $regex: search, $options: 'i' } }];
   let shops = await FertilizerShop.find(query).sort('-isVerified').limit(100);
   if (lat && lng) {
     shops = shops.map(shop => ({ ...shop.toObject(), distance: calculateDistance(parseFloat(lat), parseFloat(lng), shop.location.lat, shop.location.lng) }))
@@ -875,7 +742,7 @@ app.get('/api/fertilizer-shops/nearby', async (req, res) => {
 app.get('/api/fertilizer-shops', async (req, res) => {
   const { search, district } = req.query;
   const query = { isActive: true };
-  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { 'location.village': { $regex: search, $options: 'i' } }];
+  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }];
   if (district) query['location.district'] = { $regex: district, $options: 'i' };
   const shops = await FertilizerShop.find(query).sort('-rating').limit(100);
   res.json({ success: true, shops });
@@ -902,12 +769,6 @@ app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   res.json({ success: true, shop });
 });
 
-app.delete('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  await FertilizerShop.findByIdAndDelete(req.params.id);
-  res.json({ success: true });
-});
-
 app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
   const { rating } = req.body;
   if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating 1-5 required' });
@@ -916,7 +777,7 @@ app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
   shop.rating = Math.round(((shop.rating * shop.totalRatings + rating) / (shop.totalRatings + 1)) * 10) / 10;
   shop.totalRatings += 1;
   await shop.save();
-  res.json({ success: true, rating: shop.rating, totalRatings: shop.totalRatings });
+  res.json({ success: true, rating: shop.rating });
 });
 
 // ==================== ADS ====================
@@ -927,12 +788,7 @@ app.get('/api/ads/my-ads', authenticate, async (req, res) => {
 
 app.get('/api/ads/active', async (req, res) => {
   const { placement, limit = 5 } = req.query;
-  const query = {
-    status: 'active',
-    isActive: true,
-    startDate: { $lte: new Date() },
-    endDate: { $gte: new Date() },
-  };
+  const query = { status: 'active', isActive: true, startDate: { $lte: new Date() }, endDate: { $gte: new Date() } };
   if (placement && placement !== 'all') query.placement = { $in: [placement, 'all'] };
   const ads = await Ad.find(query).sort('-createdAt').limit(parseInt(limit));
   await Ad.updateMany({ _id: { $in: ads.map(ad => ad._id) } }, { $inc: { impressions: 1 } });
@@ -974,56 +830,51 @@ app.get('/api/admin/ads', authenticate, async (req, res) => {
 });
 
 // ==================== PAYMENTS ====================
-// Create payment record for UPI
 app.post('/api/payments/upi', authenticate, async (req, res) => {
   try {
-    const { adId, amount, upiTransactionId } = req.body;
+    const { adId, amount } = req.body;
     if (!adId || !amount) return res.status(400).json({ error: 'Ad ID and amount required' });
 
     const payment = await Payment.create({
       userId: req.user._id,
-      adId, amount,
+      adId,
+      amount,
       paymentMethod: 'upi',
       status: 'pending',
-      upiTransactionId: upiTransactionId || `UPI_${Date.now()}`,
     });
 
-    res.json({ success: true, paymentId: payment._id, message: 'Payment record created' });
+    res.json({
+      success: true,
+      paymentId: payment._id,
+      upiDetails: {
+        upiId: process.env.MERCHANT_UPI_ID || 'agriagent@upi',
+        merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies',
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Check payment status
 app.get('/api/payments/check-status/:adId', authenticate, async (req, res) => {
   try {
     const payment = await Payment.findOne({ adId: req.params.adId, userId: req.user._id }).sort('-createdAt');
-    
-    if (!payment) {
-      return res.json({ success: true, paymentStatus: 'not_found' });
-    }
+    if (!payment) return res.json({ success: true, paymentStatus: 'not_found' });
 
     if (payment.status === 'completed') {
       const ad = await Ad.findById(req.params.adId);
-      return res.json({
-        success: true,
-        paymentStatus: 'completed',
-        adStatus: ad?.status,
-        payment: { id: payment._id, amount: payment.amount, method: payment.paymentMethod, paidAt: payment.paidAt },
-      });
+      return res.json({ success: true, paymentStatus: 'completed', adStatus: ad?.status });
     }
 
-    res.json({ success: true, paymentStatus: payment.status });
+    res.json({ success: true, paymentStatus: 'pending' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Admin: Verify UPI payment
 app.put('/api/payments/:id/verify', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-
     const payment = await Payment.findById(req.params.id);
     if (!payment) return res.status(404).json({ error: 'Not found' });
 
@@ -1035,7 +886,7 @@ app.put('/api/payments/:id/verify', authenticate, async (req, res) => {
     await Ad.findByIdAndUpdate(payment.adId, {
       status: 'active',
       paymentStatus: 'completed',
-      paymentId: payment.upiTransactionId || payment._id.toString(),
+      paymentId: payment._id.toString(),
       updatedAt: new Date(),
     });
 
@@ -1045,9 +896,8 @@ app.put('/api/payments/:id/verify', authenticate, async (req, res) => {
   }
 });
 
-// Get payment history
 app.get('/api/payments/history', authenticate, async (req, res) => {
-  const payments = await Payment.find({ userId: req.user._id }).populate('adId', 'title placement budget').sort('-createdAt').limit(20);
+  const payments = await Payment.find({ userId: req.user._id }).populate('adId', 'title placement budget status').sort('-createdAt').limit(20);
   res.json({ success: true, payments });
 });
 
@@ -1068,6 +918,7 @@ connectDB().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 Health: http://localhost:${PORT}/health`);
+    console.log(`📍 UPI Config: http://localhost:${PORT}/api/config/upi`);
     console.log(`📍 Catbox: http://localhost:${PORT}/api/upload/catbox`);
   });
 });
