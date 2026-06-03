@@ -425,23 +425,53 @@ app.post('/api/upload/catbox', authenticate, upload.single('file'), async (req, 
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-    const form = new FormData();
+    const filename = req.file.originalname || `upload_${Date.now()}.jpg`;
+
+    // Use node-fetch / native fetch with a Blob so the multipart boundary
+    // is set automatically — axios + form-data can produce a malformed
+    // Content-Type that Catbox rejects with 412.
+    const { Blob } = require('buffer');
+    const { default: nodeFetch } = await import('node-fetch').catch(() => ({ default: null }));
+    const fetchFn = nodeFetch || fetch; // node 18+ has global fetch
+
+    const blob = new Blob([req.file.buffer], { type: req.file.mimetype });
+    const form = new (require('form-data'))();
     form.append('reqtype', 'fileupload');
-    form.append('fileToUpload', req.file.buffer, {
-      filename: req.file.originalname || `upload_${Date.now()}.jpg`,
-      contentType: req.file.mimetype,
-    });
+    form.append('fileToUpload', blob, filename);
 
-    const response = await axios.post('https://catbox.moe/user/api.php', form, {
-      headers: { ...form.getHeaders() },
-      timeout: 30000,
-    });
-
-    if (response.data && !response.data.includes('error') && response.data.startsWith('http')) {
-      console.log('✅ Catbox upload:', response.data);
-      res.json({ success: true, url: response.data });
+    // Re-build with native FormData if available (cleaner boundary handling)
+    let body, headers;
+    if (typeof globalThis.FormData !== 'undefined') {
+      const nativeForm = new globalThis.FormData();
+      nativeForm.append('reqtype', 'fileupload');
+      nativeForm.append('fileToUpload', new globalThis.Blob([req.file.buffer], { type: req.file.mimetype }), filename);
+      body = nativeForm;
+      headers = {}; // fetch sets Content-Type + boundary automatically
     } else {
-      res.status(500).json({ error: 'Upload failed' });
+      // Fallback: form-data package with explicit headers
+      const fd = new FormData();
+      fd.append('reqtype', 'fileupload');
+      fd.append('fileToUpload', req.file.buffer, { filename, contentType: req.file.mimetype, knownLength: req.file.size });
+      body = fd;
+      headers = fd.getHeaders();
+    }
+
+    const response = await fetchFn('https://catbox.moe/user/api.php', {
+      method: 'POST',
+      body,
+      headers,
+      signal: AbortSignal.timeout(30000),
+    });
+
+    const text = (await response.text()).trim();
+    console.log('Catbox response:', response.status, text);
+
+    if (response.ok && text.startsWith('http')) {
+      console.log('✅ Catbox upload:', text);
+      res.json({ success: true, url: text });
+    } else {
+      console.error('❌ Catbox rejected:', response.status, text);
+      res.status(500).json({ error: `Upload failed: ${text || response.status}` });
     }
   } catch (error) {
     console.error('❌ Upload error:', error.message);
@@ -570,15 +600,38 @@ app.get('/api/equipment', async (req, res) => {
   res.json({ success: true, equipment });
 });
 
+// UPDATED: includes profile.phone and debug logging
 app.get('/api/equipment/:id', async (req, res) => {
-  const equipment = await Equipment.findById(req.params.id).populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
-  if (!equipment) return res.status(404).json({ error: 'Not found' });
-  res.json({ success: true, equipment });
+  try {
+    const equipment = await Equipment.findById(req.params.id)
+      .populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
+
+    if (!equipment) return res.status(404).json({ error: 'Not found' });
+
+    console.log('Equipment owner data:', {
+      name:  equipment.ownerId?.profile?.name,
+      phone: equipment.ownerId?.profile?.phone,
+    });
+
+    res.json({ success: true, equipment });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// UPDATED: saves contactPhone to user profile if phone is missing
 app.post('/api/equipment', authenticate, async (req, res) => {
-  const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
-  res.status(201).json({ success: true, equipment });
+  try {
+    if (!req.user.profile?.phone && req.body.contactPhone) {
+      req.user.profile.phone = req.body.contactPhone;
+      await req.user.save();
+    }
+
+    const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
+    res.status(201).json({ success: true, equipment });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.put('/api/equipment/:id', authenticate, async (req, res) => {
