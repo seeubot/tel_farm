@@ -1120,36 +1120,92 @@ app.get('/api/payments/upi-details', async (req, res) => {
 // ==================== SUBMIT PAYMENT WITH UTR ====================
 app.post('/api/payments/confirm-payment', authenticate, async (req, res) => {
   try {
-    const { adId, paymentId, utrNumber } = req.body;
+    const { adId, utrNumber } = req.body;
+    
+    console.log('📩 Payment confirmation received:', { adId, utrNumber, userId: req.user._id });
+    
     if (!adId) return res.status(400).json({ error: 'Ad ID required' });
     if (!utrNumber) return res.status(400).json({ error: 'UTR number required' });
 
     // Find the payment
-    const payment = await Payment.findOne({ adId, userId: req.user._id });
+    const payment = await Payment.findOne({ adId, userId: req.user._id }).sort('-createdAt');
+    
+    console.log('🔍 Payment found:', payment ? 'Yes' : 'No');
     
     if (!payment) {
-      return res.status(404).json({ error: 'Payment record not found' });
+      // Create a new payment record if not found
+      const newPayment = await Payment.create({
+        userId: req.user._id,
+        adId,
+        amount: 0, // We don't have amount here
+        paymentMethod: 'upi',
+        status: 'pending_verification',
+        utrNumber: utrNumber,
+        userConfirmed: true,
+        userConfirmedAt: new Date(),
+      });
+      
+      console.log('✅ New payment created:', newPayment._id, 'UTR:', utrNumber);
+      
+      await Ad.findByIdAndUpdate(adId, { 
+        paymentStatus: 'pending_verification',
+        updatedAt: new Date(),
+      });
+      
+      return res.json({ 
+        success: true, 
+        message: 'Payment submitted for verification',
+        paymentId: newPayment._id 
+      });
     }
 
-    // Save UTR and mark as pending verification
+    // Update existing payment
     payment.utrNumber = utrNumber;
     payment.status = 'pending_verification';
     payment.userConfirmed = true;
     payment.userConfirmedAt = new Date();
     payment.updatedAt = new Date();
     await payment.save();
+    
+    console.log('✅ Payment updated:', payment._id, 'UTR:', utrNumber);
 
     // Update ad status
-    await Ad.findByIdAndUpdate(adId, {
+    await Ad.findByIdAndUpdate(adId, { 
       paymentStatus: 'pending_verification',
       updatedAt: new Date(),
     });
 
-    console.log(`📢 Payment confirmation: User ${req.user.email} | UTR: ${utrNumber} | Amount: ₹${payment.amount}`);
+    res.json({ 
+      success: true, 
+      message: 'Payment confirmation submitted with UTR',
+      payment: {
+        id: payment._id,
+        utrNumber: payment.utrNumber,
+        status: payment.status,
+      }
+    });
+  } catch (error) {
+    console.error('❌ Confirm payment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
+// ==================== DEBUG ====================
+app.get('/api/debug/payments', async (req, res) => {
+  try {
+    const payments = await Payment.find().sort('-createdAt').limit(20);
     res.json({
-      success: true,
-      message: 'Payment confirmation submitted with UTR. Admin will verify shortly.',
+      total: payments.length,
+      payments: payments.map(p => ({
+        id: p._id,
+        adId: p.adId,
+        userId: p.userId,
+        amount: p.amount,
+        utrNumber: p.utrNumber,
+        userConfirmed: p.userConfirmed,
+        status: p.status,
+        createdAt: p.createdAt,
+      }))
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
