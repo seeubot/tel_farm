@@ -6,6 +6,10 @@ const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
 const { OAuth2Client } = require('google-auth-library');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const FormData = require('form-data');
+const axios = require('axios');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -35,7 +39,7 @@ if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       }),
     });
-    console.log('✅ Firebase Admin initialized for project:', process.env.FIREBASE_PROJECT_ID);
+    console.log('✅ Firebase Admin initialized');
   } catch (error) {
     console.error('❌ Firebase Admin error:', error.message);
   }
@@ -57,6 +61,20 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Multer for file uploads
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP allowed.'), false);
+    }
+  },
+});
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -238,7 +256,6 @@ const solutionSchema = new mongoose.Schema({
   createdAt:      { type: Date, default: Date.now },
 });
 
-// ==================== FERTILIZER SHOP MODEL ====================
 const fertilizerShopSchema = new mongoose.Schema({
   name:           { type: String, required: true },
   teluguName:     { type: String },
@@ -275,7 +292,6 @@ const fertilizerShopSchema = new mongoose.Schema({
   updatedAt:    { type: Date, default: Date.now },
 });
 
-// ==================== AD MODEL (UPDATED PLACEMENT ARCHITECTURE) ====================
 const adSchema = new mongoose.Schema({
   title:           { type: String, required: true },
   teluguTitle:     { type: String },
@@ -285,12 +301,12 @@ const adSchema = new mongoose.Schema({
   advertiserPhone: { type: String },
   type: {
     type: String,
-    enum: ['banner', 'sponsored', 'featured'], // Removed 'popup'
+    enum: ['banner', 'sponsored', 'featured'],
     default: 'banner',
   },
   placement: {
     type: String,
-    enum: ['home', 'home_premium', 'marketplace', 'equipment', 'solutions', 'all'], // Added 'home_premium' layout map hook
+    enum: ['home', 'home_premium', 'marketplace', 'equipment', 'solutions', 'all'],
     default: 'home',
   },
   targetAudience: {
@@ -304,7 +320,7 @@ const adSchema = new mongoose.Schema({
     redirectUrl: { type: String },
   },
   budget:        { type: Number, required: true },
-  duration:      { type: Number, required: true }, // in days
+  duration:      { type: Number, required: true },
   impressions:   { type: Number, default: 0 },
   clicks:        { type: Number, default: 0 },
   ctr:           { type: Number, default: 0 },
@@ -322,6 +338,33 @@ const adSchema = new mongoose.Schema({
   updatedAt:     { type: Date, default: Date.now },
 });
 
+const paymentSchema = new mongoose.Schema({
+  userId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  adId:        { type: mongoose.Schema.Types.ObjectId, ref: 'Ad', required: true },
+  amount:      { type: Number, required: true },
+  currency:    { type: String, default: 'INR' },
+  paymentMethod: {
+    type: String,
+    enum: ['upi', 'card', 'netbanking', 'razorpay'],
+    default: 'upi',
+  },
+  status: {
+    type: String,
+    enum: ['pending', 'completed', 'failed', 'refunded'],
+    default: 'pending',
+  },
+  transactionId: { type: String },
+  upiTransactionId: { type: String },
+  paymentDetails: {
+    upiId: { type: String },
+    cardLast4: { type: String },
+    bankName: { type: String },
+  },
+  paidAt: { type: Date },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+});
+
 const User            = mongoose.model('User',            userSchema);
 const Equipment       = mongoose.model('Equipment',       equipmentSchema);
 const Produce         = mongoose.model('Produce',         produceSchema);
@@ -331,6 +374,7 @@ const Problem         = mongoose.model('Problem',         problemSchema);
 const Solution        = mongoose.model('Solution',        solutionSchema);
 const FertilizerShop  = mongoose.model('FertilizerShop',  fertilizerShopSchema);
 const Ad              = mongoose.model('Ad',              adSchema);
+const Payment         = mongoose.model('Payment',         paymentSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -342,19 +386,17 @@ const authenticate = async (req, res, next) => {
 
     const rawToken = authHeader.split(' ')[1];
 
-    // Dev shortcut
     if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
       req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer' };
       return next();
     }
 
-    // JWT token
     if (rawToken.startsWith('eyJ')) {
       try {
         const decoded = jwt.verify(rawToken, process.env.JWT_SECRET || 'agriagent-secret-key');
         const user = await User.findById(decoded.userId);
         if (!user) return res.status(401).json({ error: 'User not found' });
-        if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
+        if (!user.isActive) return res.status(401).json({ error: 'Account deactivated' });
         req.user = user;
         return next();
       } catch (jwtError) {
@@ -362,7 +404,6 @@ const authenticate = async (req, res, next) => {
       }
     }
 
-    // Google access token (PKCE)
     if (rawToken.startsWith('google_')) {
       const accessToken = rawToken.slice(7);
       const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
@@ -371,13 +412,12 @@ const authenticate = async (req, res, next) => {
         return res.status(401).json({ error: 'Invalid Google access token' });
       }
       const user = await User.findOne({ email: tokenInfo.email });
-      if (!user) return res.status(401).json({ error: 'User not found. Please sign in first.' });
-      if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
+      if (!user) return res.status(401).json({ error: 'User not found' });
+      if (!user.isActive) return res.status(401).json({ error: 'Account deactivated' });
       req.user = user;
       return next();
     }
 
-    // Firebase ID token
     if (!firebaseAdmin) return res.status(401).json({ error: 'Auth service not configured' });
 
     const decodedToken = await firebaseAdmin.auth().verifyIdToken(rawToken);
@@ -392,7 +432,7 @@ const authenticate = async (req, res, next) => {
         },
       });
     }
-    if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
+    if (!user.isActive) return res.status(401).json({ error: 'Account deactivated' });
     req.user = user;
     next();
   } catch (error) {
@@ -407,12 +447,67 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLng / 2) * Math.sin(dLng / 2);
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
 };
+
+// ==================== CATBOX UPLOAD ====================
+app.post('/api/upload/catbox', authenticate, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    const form = new FormData();
+    form.append('reqtype', 'fileupload');
+    form.append('fileToUpload', req.file.buffer, {
+      filename: req.file.originalname || `upload_${Date.now()}.jpg`,
+      contentType: req.file.mimetype,
+    });
+
+    const response = await axios.post('https://catbox.moe/user/api.php', form, {
+      headers: { ...form.getHeaders() },
+      timeout: 30000,
+    });
+
+    if (response.data && !response.data.includes('error') && response.data.startsWith('http')) {
+      console.log('✅ Catbox upload:', response.data);
+      res.json({ success: true, url: response.data });
+    } else {
+      res.status(500).json({ error: 'Upload failed: ' + response.data });
+    }
+  } catch (error) {
+    console.error('❌ Upload error:', error.message);
+    res.status(500).json({ error: 'Upload failed: ' + error.message });
+  }
+});
+
+// ==================== SIMPLE IMAGE UPLOAD ====================
+app.post('/api/upload/image', authenticate, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+    // Convert to base64 and return as data URL
+    const base64 = req.file.buffer.toString('base64');
+    const dataUrl = `data:${req.file.mimetype};base64,${base64}`;
+
+    console.log('✅ Image uploaded:', {
+      filename: req.file.originalname,
+      size: req.file.size,
+    });
+    res.json({
+      success: true,
+      url: dataUrl,
+      message: 'Image uploaded successfully',
+    });
+  } catch (error) {
+    console.error('❌ Upload error:', error.message);
+    res.status(500).json({ error: 'Upload failed: ' + error.message });
+  }
+});
 
 // ==================== HEALTH CHECK ====================
 app.get('/health', async (req, res) => {
@@ -429,165 +524,30 @@ app.get('/health', async (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({
-    message: 'AgriAgent API is running',
+    message: 'AgriAgent API',
     version: '1.0.0',
     status: 'active',
-    endpoints: {
-      health:            'GET /health',
-      auth:              'POST /api/auth/google, POST /api/auth/google-mobile, GET /api/auth/google-mobile/callback, GET /api/auth/me, PUT /api/auth/role, PUT /api/auth/profile, POST /api/auth/verify-age, GET /api/auth/session',
-      equipment:         'GET,POST /api/equipment, GET,PUT,DELETE /api/equipment/:id',
-      produce:           'GET,POST /api/produce, GET,PUT,DELETE /api/produce/:id',
-      bookings:          'GET,POST /api/bookings, PUT /api/bookings/:id',
-      users:             'DELETE /api/users/delete-account, GET /api/users/export-data',
-      reports:           'POST /api/reports',
-      problems:          'GET,POST /api/problems, GET /api/problems/:id, POST /api/problems/:id/solutions, POST /api/problems/:id/upvote',
-      solutions:         'POST /api/solutions/:id/upvote',
-      labourers:         'GET /api/labourers, GET /api/labourers/nearby, GET /api/labourers/:id',
-      contractors:       'GET /api/contractors, GET /api/contractors/:id',
-      dashboard:         'GET /api/dashboard/stats',
-      fertilizerShops:   'GET /api/fertilizer-shops/nearby, GET /api/fertilizer-shops/my-shops, GET,POST /api/fertilizer-shops, GET,PUT,DELETE /api/fertilizer-shops/:id, POST /api/fertilizer-shops/:id/rate',
-      ads:               'GET /api/ads/active, GET /api/ads/my-ads, POST /api/ads, PUT /api/ads/:id/status, POST /api/ads/:id/click, GET /api/admin/ads',
-    },
   });
 });
 
-// ==================== AUTH — GOOGLE OAUTH CALLBACK ====================
+// ==================== AUTH ROUTES ====================
 app.get('/api/auth/google-mobile/callback', async (req, res) => {
   try {
-    console.log('[Auth Callback] Received request');
     const { code, state: codeVerifier, error: googleError } = req.query;
-    console.log('[Auth Callback] Params:', { hasCode: !!code, hasVerifier: !!codeVerifier, error: googleError || 'none' });
-
-    if (googleError) {
-      console.error('[Auth Callback] Google error:', googleError);
-      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
-    }
-    if (!code || !codeVerifier) {
-      console.error('[Auth Callback] Missing code or verifier');
-      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Missing authentication parameters')}`);
-    }
+    if (googleError) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
+    if (!code || !codeVerifier) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Missing parameters')}`);
 
     const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
-    console.log('[Auth Callback] Exchanging code, redirectUri:', redirectUri);
-
     const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier, redirect_uri: redirectUri });
-    console.log('[Auth Callback] Tokens received:', { hasAccessToken: !!tokens.access_token });
-
-    if (!tokens.access_token) {
-      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to obtain access token')}`);
-    }
+    if (!tokens.access_token) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to obtain token')}`);
 
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
     const googleUser = await userInfoRes.json();
-    console.log('[Auth Callback] Google user:', { email: googleUser.email });
-
-    if (!googleUser.email) {
-      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to fetch user info from Google')}`);
-    }
-
-    if (!googleUser.sub) {
-      return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Invalid Google ID')}`);
-    }
+    if (!googleUser.email || !googleUser.sub) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Failed to fetch user info')}`);
 
     let user = await User.findOne({ $or: [{ email: googleUser.email }, { googleId: googleUser.sub }] });
-
-    if (!user) {
-      console.log('[Auth Callback] Creating new user...');
-      user = await User.create({
-        googleId: googleUser.sub,
-        email:    googleUser.email,
-        profile:  { name: googleUser.name, profileImage: googleUser.picture },
-        verification: { isVerified: false },
-        ageVerified: false,
-      });
-      console.log('✅ New user created from mobile:', user.email);
-    } else {
-      console.log('[Auth Callback] User found:', user._id);
-      if (!user.googleId) {
-        user.googleId = googleUser.sub;
-        await user.save();
-      }
-    }
-
-    const appToken = jwt.sign(
-      { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET || 'agriagent-secret-key',
-      { expiresIn: '30d' }
-    );
-
-    const params = new URLSearchParams({ token: appToken, userId: user._id.toString(), email: user.email, role: user.role });
-    const deepLink = `agriagent://auth?${params.toString()}`;
-    console.log('[Auth Callback] ✅ Redirecting to deep link:', deepLink.substring(0, 60) + '...');
-    return res.redirect(302, deepLink);
-  } catch (error) {
-    console.error('[Auth Callback] ❌ Error:', error);
-    return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(error.message || 'Server error')}`);
-  }
-});
-
-// ==================== AUTH — LEGACY GOOGLE ====================
-app.post('/api/auth/google', async (req, res) => {
-  try {
-    const { email, name, picture, googleId } = req.body;
-
-    if (!googleId) {
-      return res.status(400).json({ error: 'Invalid Google ID' });
-    }
-
-    let user = await User.findOne({ $or: [{ email }, { googleId }] });
-
-    if (!user) {
-      user = await User.create({
-        googleId: googleId,
-        email:    email,
-        profile: {
-          name:         name,
-          profileImage: picture,
-        },
-        verification: { isVerified: false },
-        ageVerified: false,
-      });
-      console.log('✅ New user created:', user.email);
-    }
-
-    res.json({
-      success: true,
-      user: {
-        id:           user._id,
-        email:        user.email,
-        role:         user.role,
-        profile:      user.profile,
-        verification: user.verification,
-        ageVerified:  user.ageVerified,
-      },
-    });
-  } catch (error) {
-    console.error('Google auth error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== AUTH — PKCE MOBILE FLOW ====================
-app.post('/api/auth/google-mobile', async (req, res) => {
-  try {
-    const { code, codeVerifier, redirectUri } = req.body;
-    if (!code || !codeVerifier || !redirectUri) {
-      return res.status(400).json({ error: 'code, codeVerifier, and redirectUri are required' });
-    }
-
-    googleOAuthClient.redirectUri = redirectUri;
-    const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier });
-    if (!tokens.access_token) return res.status(400).json({ error: 'Failed to obtain access token from Google' });
-
-    const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { Authorization: `Bearer ${tokens.access_token}` },
-    });
-    if (!userInfoRes.ok) return res.status(400).json({ error: 'Failed to fetch Google user info' });
-
-    const googleUser = await userInfoRes.json();
-    let user = await User.findOne({ email: googleUser.email });
     if (!user) {
       user = await User.create({
         googleId: googleUser.sub,
@@ -599,621 +559,521 @@ app.post('/api/auth/google-mobile', async (req, res) => {
     } else {
       if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
     }
-    if (!user.isActive) return res.status(401).json({ error: 'Account has been deactivated' });
 
-    res.json({ success: true, idToken: tokens.access_token, user: { id: user._id, email: user.email, role: user.role, profile: user.profile, verification: user.verification, ageVerified: user.ageVerified } });
+    const appToken = jwt.sign(
+      { userId: user._id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || 'agriagent-secret-key',
+      { expiresIn: '30d' }
+    );
+
+    const params = new URLSearchParams({ token: appToken, userId: user._id.toString(), email: user.email, role: user.role });
+    return res.redirect(302, `agriagent://auth?${params.toString()}`);
   } catch (error) {
-    console.error('PKCE token exchange error:', error);
-    res.status(500).json({ error: error.message || 'Token exchange failed' });
+    console.error('[Auth] Error:', error);
+    return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(error.message)}`);
   }
 });
 
-// ==================== AUTH — SESSION / ME / ROLE / PROFILE / AGE ====================
-app.get('/api/auth/session', authenticate, async (req, res) => {
+app.post('/api/auth/google', async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1] || '';
-    res.json({ success: true, token, user: { id: req.user._id, email: req.user.email, role: req.user.role, profile: req.user.profile, verification: req.user.verification, ageVerified: req.user.ageVerified } });
+    const { email, name, picture, googleId } = req.body;
+    if (!googleId) return res.status(400).json({ error: 'Invalid Google ID' });
+    let user = await User.findOne({ $or: [{ email }, { googleId }] });
+    if (!user) {
+      user = await User.create({ googleId, email, profile: { name, profileImage: picture }, verification: { isVerified: false }, ageVerified: false });
+    }
+    res.json({ success: true, user: { id: user._id, email: user.email, role: user.role, profile: user.profile } });
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/auth/google-mobile', async (req, res) => {
+  try {
+    const { code, codeVerifier, redirectUri } = req.body;
+    if (!code || !codeVerifier || !redirectUri) return res.status(400).json({ error: 'Missing parameters' });
+    googleOAuthClient.redirectUri = redirectUri;
+    const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier });
+    if (!tokens.access_token) return res.status(400).json({ error: 'Failed to obtain token' });
+    const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    });
+    const googleUser = await userInfoRes.json();
+    let user = await User.findOne({ email: googleUser.email });
+    if (!user) {
+      user = await User.create({ googleId: googleUser.sub, email: googleUser.email, profile: { name: googleUser.name, profileImage: googleUser.picture }, verification: { isVerified: false }, ageVerified: false });
+    } else {
+      if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
+    }
+    res.json({ success: true, idToken: tokens.access_token, user: { id: user._id, email: user.email, role: user.role } });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/auth/session', authenticate, async (req, res) => {
+  res.json({ success: true, user: { id: req.user._id, email: req.user.email, role: req.user.role } });
 });
 
 app.get('/api/auth/me', authenticate, async (req, res) => {
-  try {
-    res.json({ success: true, user: { id: req.user._id, email: req.user.email, role: req.user.role, profile: req.user.profile, verification: req.user.verification, labourerDetails: req.user.labourerDetails, contractorDetails: req.user.contractorDetails, ratings: req.user.ratings, ageVerified: req.user.ageVerified } });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  res.json({ success: true, user: req.user });
 });
 
 app.put('/api/auth/role', authenticate, async (req, res) => {
-  try {
-    const { role } = req.body;
-    if (!['farmer', 'labourer', 'contractor', 'buyer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
-    req.user.role = role;
-    await req.user.save();
-    res.json({ success: true, role: req.user.role });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { role } = req.body;
+  if (!['farmer', 'labourer', 'contractor', 'buyer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  req.user.role = role;
+  await req.user.save();
+  res.json({ success: true, role: req.user.role });
 });
 
 app.put('/api/auth/profile', authenticate, async (req, res) => {
-  try {
-    const { name, teluguName, phone, location, labourerDetails, contractorDetails } = req.body;
-    if (name)              req.user.profile.name = name;
-    if (teluguName)        req.user.profile.teluguName = teluguName;
-    if (phone)             req.user.profile.phone = phone;
-    if (location)          req.user.profile.location = location;
-    if (labourerDetails)   req.user.labourerDetails = labourerDetails;
-    if (contractorDetails) req.user.contractorDetails = contractorDetails;
-    req.user.updatedAt = Date.now();
-    await req.user.save();
-    res.json({ success: true, user: req.user });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { name, teluguName, phone, location, labourerDetails, contractorDetails } = req.body;
+  if (name) req.user.profile.name = name;
+  if (teluguName) req.user.profile.teluguName = teluguName;
+  if (phone) req.user.profile.phone = phone;
+  if (location) req.user.profile.location = location;
+  if (labourerDetails) req.user.labourerDetails = labourerDetails;
+  if (contractorDetails) req.user.contractorDetails = contractorDetails;
+  req.user.updatedAt = Date.now();
+  await req.user.save();
+  res.json({ success: true, user: req.user });
 });
 
 app.post('/api/auth/verify-age', authenticate, async (req, res) => {
-  try {
-    const { age } = req.body;
-    if (age < 18) return res.status(400).json({ error: 'You must be 18 years or older to use AgriAgent' });
-    req.user.ageVerified = true;
-    req.user.age = age;
-    await req.user.save();
-    res.json({ success: true, message: 'Age verified successfully' });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { age } = req.body;
+  if (age < 18) return res.status(400).json({ error: 'Must be 18+' });
+  req.user.ageVerified = true;
+  req.user.age = age;
+  await req.user.save();
+  res.json({ success: true });
 });
 
 // ==================== USER MANAGEMENT ====================
 app.delete('/api/users/delete-account', authenticate, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    await User.findByIdAndUpdate(userId, { isActive: false, deletedAt: new Date(), 'profile.name': '[Deleted User]', 'profile.phone': null });
-    await Equipment.deleteMany({ ownerId: userId });
-    await Produce.deleteMany({ farmerId: userId });
-    await Booking.updateMany({ $or: [{ renterId: userId }, { ownerId: userId }] }, { $set: { renterId: null, ownerId: null, totalAmount: 0 } });
-    res.json({ success: true, message: 'Account permanently deleted' });
-  } catch (error) {
-    console.error('Delete account error:', error);
-    res.status(500).json({ error: error.message });
-  }
+  await User.findByIdAndUpdate(req.user._id, { isActive: false, deletedAt: new Date() });
+  res.json({ success: true, message: 'Account deleted' });
 });
 
 app.get('/api/users/export-data', authenticate, async (req, res) => {
-  try {
-    const user      = await User.findById(req.user._id).select('-__v');
-    const equipment = await Equipment.find({ ownerId: req.user._id });
-    const produce   = await Produce.find({ farmerId: req.user._id });
-    const bookings  = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] });
-    res.json({ success: true, exportedAt: new Date(), data: { user, equipment, produce, bookings } });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const [user, equipment, produce, bookings] = await Promise.all([
+    User.findById(req.user._id).select('-__v'),
+    Equipment.find({ ownerId: req.user._id }),
+    Produce.find({ farmerId: req.user._id }),
+    Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }),
+  ]);
+  res.json({ success: true, data: { user, equipment, produce, bookings } });
 });
 
 // ==================== REPORTS ====================
 app.post('/api/reports', authenticate, async (req, res) => {
-  try {
-    const { type, targetId, reason, description } = req.body;
-    if (!['user', 'equipment', 'produce'].includes(type)) return res.status(400).json({ error: 'Invalid report type' });
-    const report = await Report.create({ reporterId: req.user._id, type, targetId, reason, description });
-    console.log(`📢 New report: ${type}/${targetId} by ${req.user.email}`);
-    res.json({ success: true, message: 'Report submitted successfully. We will review within 24 hours.', reportId: report._id });
-  } catch (error) {
-    console.error('Report error:', error);
-    res.status(500).json({ error: error.message });
-  }
+  const { type, targetId, reason, description } = req.body;
+  if (!['user', 'equipment', 'produce'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+  const report = await Report.create({ reporterId: req.user._id, type, targetId, reason, description });
+  res.json({ success: true, reportId: report._id });
 });
 
 // ==================== EQUIPMENT ====================
 app.get('/api/equipment', async (req, res) => {
-  try {
-    const { category, search } = req.query;
-    const query = { 'availability.isAvailable': true, isActive: true };
-    if (category && category !== 'all') query.category = category;
-    if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
-    const equipment = await Equipment.find(query)
-      .populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings')
-      .sort('-createdAt').limit(50);
-    res.json({ success: true, equipment });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { category, search } = req.query;
+  const query = { 'availability.isAvailable': true, isActive: true };
+  if (category && category !== 'all') query.category = category;
+  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
+  const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
+  res.json({ success: true, equipment });
 });
 
 app.get('/api/equipment/:id', async (req, res) => {
-  try {
-    const equipment = await Equipment.findById(req.params.id)
-      .populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
-    if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
-    res.json({ success: true, equipment });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const equipment = await Equipment.findById(req.params.id).populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
+  if (!equipment) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true, equipment });
 });
 
 app.post('/api/equipment', authenticate, async (req, res) => {
-  try {
-    const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
-    res.status(201).json({ success: true, equipment });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
+  res.status(201).json({ success: true, equipment });
 });
 
 app.put('/api/equipment/:id', authenticate, async (req, res) => {
-  try {
-    const equipment = await Equipment.findById(req.params.id);
-    if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
-    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    Object.assign(equipment, req.body);
-    await equipment.save();
-    res.json({ success: true, equipment });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const equipment = await Equipment.findById(req.params.id);
+  if (!equipment) return res.status(404).json({ error: 'Not found' });
+  if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  Object.assign(equipment, req.body);
+  await equipment.save();
+  res.json({ success: true, equipment });
+});
+
+app.delete('/api/equipment/:id', authenticate, async (req, res) => {
+  const equipment = await Equipment.findById(req.params.id);
+  if (!equipment) return res.status(404).json({ error: 'Not found' });
+  if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  await equipment.deleteOne();
+  res.json({ success: true });
 });
 
 // ==================== PRODUCE ====================
 app.get('/api/produce', async (req, res) => {
-  try {
-    const { crop, search, organic } = req.query;
-    const query = { isAvailable: true, isActive: true };
-    if (crop && crop !== 'all') query.cropName = crop;
-    if (search) query.$or = [{ cropName: { $regex: search, $options: 'i' } }, { variety: { $regex: search, $options: 'i' } }];
-    if (organic === 'true') query.organic = true;
-    const produce = await Produce.find(query)
-      .populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings')
-      .sort('-createdAt').limit(50);
-    res.json({ success: true, produce });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { crop, search, organic } = req.query;
+  const query = { isAvailable: true, isActive: true };
+  if (crop && crop !== 'all') query.cropName = crop;
+  if (search) query.$or = [{ cropName: { $regex: search, $options: 'i' } }, { variety: { $regex: search, $options: 'i' } }];
+  if (organic === 'true') query.organic = true;
+  const produce = await Produce.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
+  res.json({ success: true, produce });
 });
 
 app.get('/api/produce/:id', async (req, res) => {
-  try {
-    const produce = await Produce.findById(req.params.id)
-      .populate('farmerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
-    if (!produce) return res.status(404).json({ error: 'Produce not found' });
-    res.json({ success: true, produce });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const produce = await Produce.findById(req.params.id).populate('farmerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
+  if (!produce) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true, produce });
 });
 
 app.post('/api/produce', authenticate, async (req, res) => {
-  try {
-    const produce = await Produce.create({ ...req.body, farmerId: req.user._id });
-    res.status(201).json({ success: true, produce });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const produce = await Produce.create({ ...req.body, farmerId: req.user._id });
+  res.status(201).json({ success: true, produce });
 });
 
 app.put('/api/produce/:id', authenticate, async (req, res) => {
-  try {
-    const produce = await Produce.findById(req.params.id);
-    if (!produce) return res.status(404).json({ error: 'Produce not found' });
-    if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    Object.assign(produce, req.body);
-    await produce.save();
-    res.json({ success: true, produce });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const produce = await Produce.findById(req.params.id);
+  if (!produce) return res.status(404).json({ error: 'Not found' });
+  if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  Object.assign(produce, req.body);
+  await produce.save();
+  res.json({ success: true, produce });
 });
 
 app.delete('/api/produce/:id', authenticate, async (req, res) => {
-  try {
-    const produce = await Produce.findById(req.params.id);
-    if (!produce) return res.status(404).json({ error: 'Produce not found' });
-    if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    await produce.deleteOne();
-    res.json({ success: true, message: 'Listing deleted' });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const produce = await Produce.findById(req.params.id);
+  if (!produce) return res.status(404).json({ error: 'Not found' });
+  if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  await produce.deleteOne();
+  res.json({ success: true });
 });
 
 // ==================== BOOKINGS ====================
 app.get('/api/bookings', authenticate, async (req, res) => {
-  try {
-    const bookings = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }).sort('-createdAt');
-    res.json({ success: true, bookings });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const bookings = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }).sort('-createdAt');
+  res.json({ success: true, bookings });
 });
 
 app.post('/api/bookings', authenticate, async (req, res) => {
-  try {
-    const booking = await Booking.create({ ...req.body, renterId: req.user._id });
-    res.status(201).json({ success: true, booking });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const booking = await Booking.create({ ...req.body, renterId: req.user._id });
+  res.status(201).json({ success: true, booking });
 });
 
 app.put('/api/bookings/:id', authenticate, async (req, res) => {
-  try {
-    const booking = await Booking.findById(req.params.id);
-    if (!booking) return res.status(404).json({ error: 'Booking not found' });
-    if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    booking.status = req.body.status;
-    await booking.save();
-    res.json({ success: true, booking });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Not found' });
+  if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  booking.status = req.body.status;
+  await booking.save();
+  res.json({ success: true, booking });
 });
 
 // ==================== PROBLEMS & SOLUTIONS ====================
 app.get('/api/problems', async (req, res) => {
-  try {
-    const { crop, search } = req.query;
-    const query = { isActive: true };
-    if (crop && crop !== 'all') query.cropType = crop;
-    if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
-    const problems = await Problem.find(query)
-      .populate('farmerId', 'profile.name profile.profileImage verification.isVerified')
-      .sort('-upvotes').limit(50);
-    res.json({ success: true, problems });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { crop, search } = req.query;
+  const query = { isActive: true };
+  if (crop && crop !== 'all') query.cropType = crop;
+  if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
+  const problems = await Problem.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes').limit(50);
+  res.json({ success: true, problems });
 });
 
 app.get('/api/problems/:id', async (req, res) => {
-  try {
-    const problem = await Problem.findById(req.params.id)
-      .populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings');
-    if (!problem) return res.status(404).json({ error: 'Problem not found' });
-    const solutions = await Solution.find({ problemId: problem._id, isActive: true })
-      .populate('farmerId', 'profile.name profile.profileImage verification.isVerified')
-      .sort('-upvotes');
-    res.json({ success: true, problem, solutions });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const problem = await Problem.findById(req.params.id).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings');
+  if (!problem) return res.status(404).json({ error: 'Not found' });
+  const solutions = await Solution.find({ problemId: problem._id, isActive: true }).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes');
+  res.json({ success: true, problem, solutions });
 });
 
 app.post('/api/problems', authenticate, async (req, res) => {
-  try {
-    const problem = await Problem.create({ ...req.body, farmerId: req.user._id });
-    res.status(201).json({ success: true, problem });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const problem = await Problem.create({ ...req.body, farmerId: req.user._id });
+  res.status(201).json({ success: true, problem });
 });
 
 app.post('/api/problems/:id/solutions', authenticate, async (req, res) => {
-  try {
-    const solution = await Solution.create({
-      problemId:      req.params.id,
-      farmerId:       req.user._id,
-      solution:       req.body.solution,
-      teluguSolution: req.body.teluguSolution,
-      mediaUrl:       req.body.mediaUrl,
-      mediaType:      req.body.mediaType,
-    });
-    await Problem.findByIdAndUpdate(req.params.id, { $inc: { solutionCount: 1 } });
-    res.status(201).json({ success: true, solution });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const solution = await Solution.create({ problemId: req.params.id, farmerId: req.user._id, ...req.body });
+  await Problem.findByIdAndUpdate(req.params.id, { $inc: { solutionCount: 1 } });
+  res.status(201).json({ success: true, solution });
 });
 
 app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
-  try {
-    const problem = await Problem.findById(req.params.id);
-    if (!problem) return res.status(404).json({ error: 'Problem not found' });
-    const hasUpvoted = problem.upvotedBy.includes(req.user._id);
-    if (hasUpvoted) {
-      problem.upvotes -= 1;
-      problem.upvotedBy = problem.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
-    } else {
-      problem.upvotes += 1;
-      problem.upvotedBy.push(req.user._id);
-    }
-    await problem.save();
-    res.json({ success: true, upvotes: problem.upvotes, hasUpvoted: !hasUpvoted });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const problem = await Problem.findById(req.params.id);
+  if (!problem) return res.status(404).json({ error: 'Not found' });
+  const hasUpvoted = problem.upvotedBy.includes(req.user._id);
+  if (hasUpvoted) {
+    problem.upvotes -= 1;
+    problem.upvotedBy = problem.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
+  } else {
+    problem.upvotes += 1;
+    problem.upvotedBy.push(req.user._id);
+  }
+  await problem.save();
+  res.json({ success: true, upvotes: problem.upvotes, hasUpvoted: !hasUpvoted });
 });
 
 app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
-  try {
-    const solution = await Solution.findById(req.params.id);
-    if (!solution) return res.status(404).json({ error: 'Solution not found' });
-    const hasUpvoted = solution.upvotedBy.includes(req.user._id);
-    if (hasUpvoted) {
-      solution.upvotes -= 1;
-      solution.upvotedBy = solution.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
-    } else {
-      solution.upvotes += 1;
-      solution.upvotedBy.push(req.user._id);
-    }
-    await solution.save();
-    res.json({ success: true, upvotes: solution.upvotes, hasUpvoted: !hasUpvoted });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const solution = await Solution.findById(req.params.id);
+  if (!solution) return res.status(404).json({ error: 'Not found' });
+  const hasUpvoted = solution.upvotedBy.includes(req.user._id);
+  if (hasUpvoted) {
+    solution.upvotes -= 1;
+    solution.upvotedBy = solution.upvotedBy.filter(id => id.toString() !== req.user._id.toString());
+  } else {
+    solution.upvotes += 1;
+    solution.upvotedBy.push(req.user._id);
+  }
+  await solution.save();
+  res.json({ success: true, upvotes: solution.upvotes, hasUpvoted: !hasUpvoted });
 });
 
 // ==================== LABOURERS ====================
 app.get('/api/labourers/nearby', async (req, res) => {
-  try {
-    const { lat, lng, radius = 10, crop } = req.query;
-    const query = { role: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
-    if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
-    let labourers = await User.find(query)
-      .select('profile labourerDetails ratings verification email')
-      .sort('-ratings.average').limit(50);
-    if (lat && lng) {
-      labourers = labourers
-        .map(lab => ({ ...lab.toObject(), distance: calculateDistance(lat, lng, lab.profile.location?.lat, lab.profile.location?.lng) }))
-        .filter(lab => lab.distance <= Number(radius))
-        .sort((a, b) => a.distance - b.distance);
-    }
-    res.json({ success: true, labourers });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { lat, lng, radius = 10, crop } = req.query;
+  const query = { role: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
+  if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
+  let labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(50);
+  if (lat && lng) {
+    labourers = labourers.map(lab => ({ ...lab.toObject(), distance: calculateDistance(lat, lng, lab.profile.location?.lat, lab.profile.location?.lng) }))
+      .filter(lab => lab.distance <= Number(radius)).sort((a, b) => a.distance - b.distance);
+  }
+  res.json({ success: true, labourers });
 });
 
 app.get('/api/labourers', async (req, res) => {
-  try {
-    const { crop, isAvailable } = req.query;
-    const query = { role: 'labourer', isActive: true };
-    if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
-    if (isAvailable !== undefined) query['labourerDetails.isAvailable'] = isAvailable === 'true';
-    const labourers = await User.find(query)
-      .select('profile labourerDetails ratings verification email')
-      .sort('-ratings.average').limit(100);
-    res.json({ success: true, labourers });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { crop, isAvailable } = req.query;
+  const query = { role: 'labourer', isActive: true };
+  if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
+  if (isAvailable !== undefined) query['labourerDetails.isAvailable'] = isAvailable === 'true';
+  const labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(100);
+  res.json({ success: true, labourers });
 });
 
 app.get('/api/labourers/:id', async (req, res) => {
-  try {
-    const labourer = await User.findOne({ _id: req.params.id, role: 'labourer' })
-      .select('profile labourerDetails ratings verification email');
-    if (!labourer) return res.status(404).json({ error: 'Labourer not found' });
-    res.json({ success: true, labourer });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const labourer = await User.findOne({ _id: req.params.id, role: 'labourer' }).select('profile labourerDetails ratings verification email');
+  if (!labourer) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true, labourer });
 });
 
 // ==================== CONTRACTORS ====================
 app.get('/api/contractors', async (req, res) => {
-  try {
-    const { crop, isActive } = req.query;
-    const query = { role: 'contractor', isActive: true };
-    if (crop && crop !== 'all') query['contractorDetails.crops'] = crop;
-    if (isActive !== undefined) query['contractorDetails.isActive'] = isActive === 'true';
-    const contractors = await User.find(query)
-      .select('profile contractorDetails ratings verification email')
-      .sort('-ratings.average').limit(100);
-    res.json({ success: true, contractors });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const { crop } = req.query;
+  const query = { role: 'contractor', isActive: true };
+  if (crop && crop !== 'all') query['contractorDetails.crops'] = crop;
+  const contractors = await User.find(query).select('profile contractorDetails ratings verification email').sort('-ratings.average').limit(100);
+  res.json({ success: true, contractors });
 });
 
 app.get('/api/contractors/:id', async (req, res) => {
-  try {
-    const contractor = await User.findOne({ _id: req.params.id, role: 'contractor' })
-      .select('profile contractorDetails ratings verification email');
-    if (!contractor) return res.status(404).json({ error: 'Contractor not found' });
-    res.json({ success: true, contractor });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const contractor = await User.findOne({ _id: req.params.id, role: 'contractor' }).select('profile contractorDetails ratings verification email');
+  if (!contractor) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true, contractor });
 });
 
 // ==================== DASHBOARD ====================
 app.get('/api/dashboard/stats', authenticate, async (req, res) => {
-  try {
-    const [equipmentCount, produceCount, bookingsAsRenter, bookingsAsOwner] = await Promise.all([
-      Equipment.countDocuments({ ownerId: req.user._id }),
-      Produce.countDocuments({ farmerId: req.user._id }),
-      Booking.countDocuments({ renterId: req.user._id }),
-      Booking.countDocuments({ ownerId: req.user._id }),
-    ]);
-    res.json({ success: true, stats: { equipmentListed: equipmentCount, produceListed: produceCount, bookingsMade: bookingsAsRenter, bookingsReceived: bookingsAsOwner } });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  const [equipmentCount, produceCount, bookingsAsRenter, bookingsAsOwner] = await Promise.all([
+    Equipment.countDocuments({ ownerId: req.user._id }),
+    Produce.countDocuments({ farmerId: req.user._id }),
+    Booking.countDocuments({ renterId: req.user._id }),
+    Booking.countDocuments({ ownerId: req.user._id }),
+  ]);
+  res.json({ success: true, stats: { equipmentListed: equipmentCount, produceListed: produceCount, bookingsMade: bookingsAsRenter, bookingsReceived: bookingsAsOwner } });
 });
 
 // ==================== FERTILIZER SHOPS ====================
-app.get('/api/fertilizer-shops/my-shops', authenticate, async (req, res) => {
-  try {
-    const shops = await FertilizerShop.find({ addedBy: req.user._id }).sort('-createdAt');
-    res.json({ success: true, shops });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.get('/api/fertilizer-shops/nearby', async (req, res) => {
-  try {
-    const { lat, lng, radius = 10, search } = req.query;
-    let query = { isActive: true };
-
-    if (search) {
-      query.$or = [
-        { name:              { $regex: search, $options: 'i' } },
-        { teluguName:        { $regex: search, $options: 'i' } },
-        { ownerName:         { $regex: search, $options: 'i' } },
-        { 'location.village':  { $regex: search, $options: 'i' } },
-        { 'location.district': { $regex: search, $options: 'i' } },
-      ];
-    }
-
-    let shops = await FertilizerShop.find(query).sort('-isVerified').limit(100);
-
-    if (lat && lng) {
-      shops = shops.map(shop => ({
-        ...shop.toObject(),
-        distance: calculateDistance(parseFloat(lat), parseFloat(lng), shop.location.lat, shop.location.lng),
-      })).filter(shop => shop.distance <= parseFloat(radius));
-
-      shops.sort((a, b) => a.distance - b.distance);
-    }
-
-    res.json({ success: true, shops });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  const { lat, lng, radius = 10, search } = req.query;
+  let query = { isActive: true };
+  if (search) {
+    query.$or = [
+      { name: { $regex: search, $options: 'i' } },
+      { 'location.village': { $regex: search, $options: 'i' } },
+      { 'location.district': { $regex: search, $options: 'i' } },
+    ];
   }
+  let shops = await FertilizerShop.find(query).sort('-isVerified').limit(100);
+  if (lat && lng) {
+    shops = shops.map(shop => ({ ...shop.toObject(), distance: calculateDistance(parseFloat(lat), parseFloat(lng), shop.location.lat, shop.location.lng) }))
+      .filter(shop => shop.distance <= parseFloat(radius)).sort((a, b) => a.distance - b.distance);
+  }
+  res.json({ success: true, shops });
 });
 
 app.get('/api/fertilizer-shops', async (req, res) => {
-  try {
-    const { search, district, isVerified } = req.query;
-    const query = { isActive: true };
-
-    if (search) {
-      query.$or = [
-        { name:              { $regex: search, $options: 'i' } },
-        { teluguName:        { $regex: search, $options: 'i' } },
-        { ownerName:         { $regex: search, $options: 'i' } },
-        { 'location.village':  { $regex: search, $options: 'i' } },
-        { 'location.district': { $regex: search, $options: 'i' } },
-      ];
-    }
-    if (district)   query['location.district'] = { $regex: district, $options: 'i' };
-    if (isVerified !== undefined) query.isVerified = isVerified === 'true';
-
-    const shops = await FertilizerShop.find(query).sort('-isVerified -rating').limit(100);
-    res.json({ success: true, shops });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const { search, district } = req.query;
+  const query = { isActive: true };
+  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { 'location.village': { $regex: search, $options: 'i' } }];
+  if (district) query['location.district'] = { $regex: district, $options: 'i' };
+  const shops = await FertilizerShop.find(query).sort('-rating').limit(100);
+  res.json({ success: true, shops });
 });
 
 app.get('/api/fertilizer-shops/:id', async (req, res) => {
-  try {
-    const shop = await FertilizerShop.findById(req.params.id);
-    if (!shop) return res.status(404).json({ error: 'Shop not found' });
-    res.json({ success: true, shop });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const shop = await FertilizerShop.findById(req.params.id);
+  if (!shop) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true, shop });
 });
 
 app.post('/api/fertilizer-shops', authenticate, async (req, res) => {
-  try {
-    const shop = await FertilizerShop.create({
-      ...req.body,
-      addedBy: req.user._id,
-    });
-    res.status(201).json({ success: true, shop });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const shop = await FertilizerShop.create({ ...req.body, addedBy: req.user._id });
+  res.status(201).json({ success: true, shop });
 });
 
 app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
-  try {
-    const shop = await FertilizerShop.findById(req.params.id);
-    if (!shop) return res.status(404).json({ error: 'Shop not found' });
-
-    if (shop.addedBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-
-    Object.assign(shop, req.body);
-    shop.updatedAt = Date.now();
-    await shop.save();
-
-    res.json({ success: true, shop });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const shop = await FertilizerShop.findById(req.params.id);
+  if (!shop) return res.status(404).json({ error: 'Not found' });
+  if (shop.addedBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  Object.assign(shop, req.body);
+  shop.updatedAt = Date.now();
+  await shop.save();
+  res.json({ success: true, shop });
 });
 
 app.delete('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
-    await FertilizerShop.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: 'Shop deleted' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  await FertilizerShop.findByIdAndDelete(req.params.id);
+  res.json({ success: true });
 });
 
 app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
-  try {
-    const { rating } = req.body;
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
-    }
-
-    const shop = await FertilizerShop.findById(req.params.id);
-    if (!shop) return res.status(404).json({ error: 'Shop not found' });
-
-    const newRating = (shop.rating * shop.totalRatings + rating) / (shop.totalRatings + 1);
-    shop.rating = Math.round(newRating * 10) / 10;
-    shop.totalRatings += 1;
-    await shop.save();
-
-    res.json({ success: true, rating: shop.rating, totalRatings: shop.totalRatings });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const { rating } = req.body;
+  if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating 1-5 required' });
+  const shop = await FertilizerShop.findById(req.params.id);
+  if (!shop) return res.status(404).json({ error: 'Not found' });
+  shop.rating = Math.round(((shop.rating * shop.totalRatings + rating) / (shop.totalRatings + 1)) * 10) / 10;
+  shop.totalRatings += 1;
+  await shop.save();
+  res.json({ success: true, rating: shop.rating, totalRatings: shop.totalRatings });
 });
 
 // ==================== ADS ====================
 app.get('/api/ads/my-ads', authenticate, async (req, res) => {
-  try {
-    const ads = await Ad.find({ advertiserId: req.user._id }).sort('-createdAt');
-    res.json({ success: true, ads });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const ads = await Ad.find({ advertiserId: req.user._id }).sort('-createdAt');
+  res.json({ success: true, ads });
 });
 
 app.get('/api/ads/active', async (req, res) => {
-  try {
-    const { placement, limit = 5 } = req.query;
-    const query = {
-      status: 'active',
-      isActive: true,
-      startDate: { $lte: new Date() },
-      endDate:   { $gte: new Date() },
-    };
-
-    if (placement && placement !== 'all') {
-      query.placement = { $in: [placement, 'all'] };
-    }
-
-    const ads = await Ad.find(query)
-      .sort('-createdAt')
-      .limit(parseInt(limit));
-
-    await Ad.updateMany(
-      { _id: { $in: ads.map(ad => ad._id) } },
-      { $inc: { impressions: 1 } }
-    );
-
-    res.json({ success: true, ads });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const { placement, limit = 5 } = req.query;
+  const query = {
+    status: 'active',
+    isActive: true,
+    startDate: { $lte: new Date() },
+    endDate: { $gte: new Date() },
+  };
+  if (placement && placement !== 'all') query.placement = { $in: [placement, 'all'] };
+  const ads = await Ad.find(query).sort('-createdAt').limit(parseInt(limit));
+  await Ad.updateMany({ _id: { $in: ads.map(ad => ad._id) } }, { $inc: { impressions: 1 } });
+  res.json({ success: true, ads });
 });
 
 app.post('/api/ads', authenticate, async (req, res) => {
-  try {
-    const adData = {
-      ...req.body,
-      advertiserId:    req.user._id,
-      advertiserName:  req.user.profile?.name,
-      advertiserPhone: req.user.profile?.phone,
-      startDate: new Date(),
-      endDate:   new Date(Date.now() + req.body.duration * 24 * 60 * 60 * 1000),
-    };
-
-    const ad = await Ad.create(adData);
-    res.status(201).json({ success: true, ad });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const adData = {
+    ...req.body,
+    advertiserId: req.user._id,
+    advertiserName: req.user.profile?.name,
+    advertiserPhone: req.user.profile?.phone,
+    startDate: new Date(),
+    endDate: new Date(Date.now() + req.body.duration * 24 * 60 * 60 * 1000),
+  };
+  const ad = await Ad.create(adData);
+  res.status(201).json({ success: true, ad });
 });
 
 app.put('/api/ads/:id/status', authenticate, async (req, res) => {
-  try {
-    const { status } = req.body;
-    const ad = await Ad.findById(req.params.id);
-
-    if (!ad) return res.status(404).json({ error: 'Ad not found' });
-
-    if (ad.advertiserId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-
-    ad.status = status;
-    ad.updatedAt = Date.now();
-    await ad.save();
-
-    res.json({ success: true, ad });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const ad = await Ad.findById(req.params.id);
+  if (!ad) return res.status(404).json({ error: 'Not found' });
+  if (ad.advertiserId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  ad.status = req.body.status;
+  ad.updatedAt = Date.now();
+  await ad.save();
+  res.json({ success: true, ad });
 });
 
 app.post('/api/ads/:id/click', async (req, res) => {
+  await Ad.findByIdAndUpdate(req.params.id, { $inc: { clicks: 1 } });
+  res.json({ success: true });
+});
+
+app.get('/api/admin/ads', authenticate, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const ads = await Ad.find().sort('-createdAt').populate('advertiserId', 'profile.name email');
+  res.json({ success: true, ads });
+});
+
+// ==================== PAYMENTS ====================
+// Create payment record for UPI
+app.post('/api/payments/upi', authenticate, async (req, res) => {
   try {
-    await Ad.findByIdAndUpdate(req.params.id, { $inc: { clicks: 1 } });
-    res.json({ success: true });
+    const { adId, amount, upiTransactionId } = req.body;
+    if (!adId || !amount) return res.status(400).json({ error: 'Ad ID and amount required' });
+
+    const payment = await Payment.create({
+      userId: req.user._id,
+      adId, amount,
+      paymentMethod: 'upi',
+      status: 'pending',
+      upiTransactionId: upiTransactionId || `UPI_${Date.now()}`,
+    });
+
+    res.json({ success: true, paymentId: payment._id, message: 'Payment record created' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/admin/ads', authenticate, async (req, res) => {
+// Check payment status
+app.get('/api/payments/check-status/:adId', authenticate, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Admin access required' });
+    const payment = await Payment.findOne({ adId: req.params.adId, userId: req.user._id }).sort('-createdAt');
+
+    if (!payment) {
+      return res.json({ success: true, paymentStatus: 'not_found' });
     }
 
-    const ads = await Ad.find().sort('-createdAt').populate('advertiserId', 'profile.name email');
-    res.json({ success: true, ads });
+    if (payment.status === 'completed') {
+      const ad = await Ad.findById(req.params.adId);
+      return res.json({
+        success: true,
+        paymentStatus: 'completed',
+        adStatus: ad?.status,
+        payment: { id: payment._id, amount: payment.amount, method: payment.paymentMethod, paidAt: payment.paidAt },
+      });
+    }
+
+    res.json({ success: true, paymentStatus: payment.status });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// Admin: Verify UPI payment
+app.put('/api/payments/:id/verify', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+
+    const payment = await Payment.findById(req.params.id);
+    if (!payment) return res.status(404).json({ error: 'Not found' });
+
+    payment.status = 'completed';
+    payment.paidAt = new Date();
+    payment.updatedAt = new Date();
+    await payment.save();
+
+    await Ad.findByIdAndUpdate(payment.adId, {
+      status: 'active',
+      paymentStatus: 'completed',
+      paymentId: payment.upiTransactionId || payment._id.toString(),
+      updatedAt: new Date(),
+    });
+
+    res.json({ success: true, message: 'Payment verified, ad activated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get payment history
+app.get('/api/payments/history', authenticate, async (req, res) => {
+  const payments = await Payment.find({ userId: req.user._id }).populate('adId', 'title placement budget').sort('-createdAt').limit(20);
+  res.json({ success: true, payments });
 });
 
 // ==================== 404 / ERROR HANDLERS ====================
@@ -1232,7 +1092,8 @@ const PORT = process.env.PORT || 5000;
 connectDB().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📍 Health check: http://localhost:${PORT}/health`);
-    console.log(`📍 Auth callback: http://localhost:${PORT}/api/auth/google-mobile/callback`);
+    console.log(`📍 Health: http://localhost:${PORT}/health`);
+    console.log(`📍 Catbox: http://localhost:${PORT}/api/upload/catbox`);
+    console.log(`📍 Image:  http://localhost:${PORT}/api/upload/image`);
   });
 });
