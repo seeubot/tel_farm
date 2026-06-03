@@ -421,61 +421,77 @@ app.get('/api/config/upi', (req, res) => {
 });
 
 // ==================== CATBOX UPLOAD ====================
+// ==================== CATBOX UPLOAD (FIXED) ====================
 app.post('/api/upload/catbox', authenticate, upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file provided' });
-
-    const filename = req.file.originalname || `upload_${Date.now()}.jpg`;
-
-    // Use node-fetch / native fetch with a Blob so the multipart boundary
-    // is set automatically — axios + form-data can produce a malformed
-    // Content-Type that Catbox rejects with 412.
-    const { Blob } = require('buffer');
-    const { default: nodeFetch } = await import('node-fetch').catch(() => ({ default: null }));
-    const fetchFn = nodeFetch || fetch; // node 18+ has global fetch
-
-    const blob = new Blob([req.file.buffer], { type: req.file.mimetype });
-    const form = new (require('form-data'))();
-    form.append('reqtype', 'fileupload');
-    form.append('fileToUpload', blob, filename);
-
-    // Re-build with native FormData if available (cleaner boundary handling)
-    let body, headers;
-    if (typeof globalThis.FormData !== 'undefined') {
-      const nativeForm = new globalThis.FormData();
-      nativeForm.append('reqtype', 'fileupload');
-      nativeForm.append('fileToUpload', new globalThis.Blob([req.file.buffer], { type: req.file.mimetype }), filename);
-      body = nativeForm;
-      headers = {}; // fetch sets Content-Type + boundary automatically
-    } else {
-      // Fallback: form-data package with explicit headers
-      const fd = new FormData();
-      fd.append('reqtype', 'fileupload');
-      fd.append('fileToUpload', req.file.buffer, { filename, contentType: req.file.mimetype, knownLength: req.file.size });
-      body = fd;
-      headers = fd.getHeaders();
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
     }
-
-    const response = await fetchFn('https://catbox.moe/user/api.php', {
-      method: 'POST',
-      body,
-      headers,
-      signal: AbortSignal.timeout(30000),
+    console.log('📤 Uploading to Catbox:', {
+      filename: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
     });
+    // Use axios with proper form-data
+    const FormDataLib = require('form-data');
+    const form = new FormDataLib();
 
-    const text = (await response.text()).trim();
-    console.log('Catbox response:', response.status, text);
-
-    if (response.ok && text.startsWith('http')) {
-      console.log('✅ Catbox upload:', text);
-      res.json({ success: true, url: text });
+    // Append as buffer with proper options
+    form.append('reqtype', 'fileupload');
+    form.append('fileToUpload', req.file.buffer, {
+      filename: req.file.originalname || `upload_${Date.now()}.jpg`,
+      contentType: req.file.mimetype || 'image/jpeg',
+      knownLength: req.file.size,
+    });
+    // Get headers from form-data
+    const headers = form.getHeaders();
+    // Upload to Catbox
+    const response = await axios.post('https://catbox.moe/user/api.php', form, {
+      headers: headers,
+      timeout: 60000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    console.log('📥 Catbox response:', response.data);
+    // Catbox returns plain text URL on success
+    if (response.data && typeof response.data === 'string' && response.data.startsWith('http')) {
+      res.json({
+        success: true,
+        url: response.data.trim(),
+      });
     } else {
-      console.error('❌ Catbox rejected:', response.status, text);
-      res.status(500).json({ error: `Upload failed: ${text || response.status}` });
+      console.error('❌ Catbox unexpected response:', response.data);
+      res.status(500).json({ error: 'Upload failed: Unexpected response from Catbox' });
     }
   } catch (error) {
     console.error('❌ Upload error:', error.message);
-    res.status(500).json({ error: 'Upload failed: ' + error.message });
+
+    // Try alternative: use fetch
+    try {
+      console.log('🔄 Trying alternative upload method...');
+      const FormDataLib = require('form-data');
+      const form = new FormDataLib();
+      form.append('reqtype', 'fileupload');
+      form.append('fileToUpload', req.file.buffer, {
+        filename: 'upload.jpg',
+        contentType: 'image/jpeg',
+      });
+      const fetchResponse = await fetch('https://catbox.moe/user/api.php', {
+        method: 'POST',
+        body: form,
+        headers: form.getHeaders(),
+      });
+      const text = await fetchResponse.text();
+      console.log('📥 Alternative response:', text);
+      if (text && text.startsWith('http')) {
+        res.json({ success: true, url: text.trim() });
+      } else {
+        res.status(500).json({ error: 'Upload failed: ' + text });
+      }
+    } catch (retryError) {
+      console.error('❌ Alternative also failed:', retryError.message);
+      res.status(500).json({ error: 'Upload failed: ' + error.message });
+    }
   }
 });
 
