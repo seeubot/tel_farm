@@ -1212,6 +1212,61 @@ app.get('/api/debug/payments', async (req, res) => {
   }
 });
 
+// ==================== DEBUG: LABOURERS & CONTRACTORS ====================
+app.get('/api/debug/labourers', async (req, res) => {
+  try {
+    const count = await User.countDocuments({ role: 'labourer', isActive: true });
+    const labourers = await User.find({ role: 'labourer', isActive: true })
+      .select('profile.name profile.phone profile.location labourerDetails ratings')
+      .limit(20);
+    
+    res.json({ 
+      success: true, 
+      totalLabourers: count,
+      labourers: labourers.map(l => ({
+        id: l._id,
+        name: l.profile?.name,
+        phone: l.profile?.phone,
+        hasLocation: !!(l.profile?.location?.lat && l.profile?.location?.lng),
+        lat: l.profile?.location?.lat,
+        lng: l.profile?.location?.lng,
+        skills: l.labourerDetails?.skills || [],
+        isAvailable: l.labourerDetails?.isAvailable,
+        experience: l.labourerDetails?.experience,
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/debug/contractors', async (req, res) => {
+  try {
+    const count = await User.countDocuments({ role: 'contractor', isActive: true });
+    const contractors = await User.find({ role: 'contractor', isActive: true })
+      .select('profile.name profile.phone profile.location contractorDetails ratings')
+      .limit(20);
+    
+    res.json({ 
+      success: true, 
+      totalContractors: count,
+      contractors: contractors.map(c => ({
+        id: c._id,
+        name: c.profile?.name,
+        companyName: c.contractorDetails?.companyName,
+        phone: c.profile?.phone,
+        hasLocation: !!(c.profile?.location?.lat && c.profile?.location?.lng),
+        lat: c.profile?.location?.lat,
+        lng: c.profile?.location?.lng,
+        crops: c.contractorDetails?.crops || [],
+        teamSize: c.contractorDetails?.teamSize,
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== 404 / ERROR HANDLERS ====================
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.url} not found` });
