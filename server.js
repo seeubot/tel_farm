@@ -56,7 +56,7 @@ const googleOAuthClient = new OAuth2Client(
 // ==================== MIDDLEWARE ====================
 app.use(helmet());
 app.use(cors({
-  origin: ['http://localhost:19000', 'http://localhost:19006', 'https://*.koyeb.app', 'exp://*', '*'],
+  origin: ['http://localhost:19000', 'http://localhost:19006', 'http://localhost:3000', 'http://localhost:5000', 'https://*.koyeb.app', 'exp://*', '*'],
   credentials: true,
 }));
 app.use(express.json());
@@ -80,8 +80,8 @@ const userSchema = new mongoose.Schema({
   firebaseUid: { type: String, unique: true, sparse: true },
   googleId:    { type: String, unique: true, sparse: true },
   email:       { type: String, required: true, unique: true },
-  roles:       [{ type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'] }], // ✅ Multi-role
-  role:        { type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'], default: 'farmer' }, // Primary role
+  roles:       [{ type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'] }],
+  role:        { type: String, enum: ['farmer', 'labourer', 'contractor', 'buyer'], default: 'farmer' },
   ageVerified: { type: Boolean, default: false },
   age:         { type: Number },
   profile: {
@@ -222,6 +222,31 @@ const paymentSchema = new mongoose.Schema({
   paidAt: Date, createdAt: { type: Date, default: Date.now }, updatedAt: { type: Date, default: Date.now },
 });
 
+// ==================== ADMIN MODEL ====================
+const adminSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  email:    { type: String, required: true, unique: true },
+  role:     { type: String, enum: ['admin', 'superadmin'], default: 'admin' },
+  lastLogin: Date,
+  isActive: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// Hash password before saving
+adminSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  const secret = process.env.JWT_SECRET || 'agriagent-secret-key';
+  this.password = crypto.createHash('sha256').update(this.password + secret).digest('hex');
+  next();
+});
+
+adminSchema.methods.comparePassword = async function(password) {
+  const secret = process.env.JWT_SECRET || 'agriagent-secret-key';
+  const hash = crypto.createHash('sha256').update(password + secret).digest('hex');
+  return hash === this.password;
+};
+
 const User           = mongoose.model('User',           userSchema);
 const Equipment      = mongoose.model('Equipment',      equipmentSchema);
 const Produce        = mongoose.model('Produce',        produceSchema);
@@ -232,6 +257,7 @@ const Solution       = mongoose.model('Solution',       solutionSchema);
 const FertilizerShop = mongoose.model('FertilizerShop', fertilizerShopSchema);
 const Ad             = mongoose.model('Ad',             adSchema);
 const Payment        = mongoose.model('Payment',        paymentSchema);
+const Admin          = mongoose.model('Admin',          adminSchema);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -239,6 +265,20 @@ const authenticate = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
     const rawToken = authHeader.split(' ')[1];
+
+    // Check if it's an admin token
+    try {
+      const decoded = jwt.verify(rawToken, process.env.JWT_SECRET || 'agriagent-secret-key');
+      if (decoded.type === 'admin') {
+        const adminUser = await Admin.findById(decoded.adminId);
+        if (!adminUser?.isActive) return res.status(401).json({ error: 'Admin account disabled' });
+        req.admin = adminUser;
+        req.user = { _id: 'admin', email: adminUser.email, role: 'admin', roles: ['admin'] };
+        return next();
+      }
+    } catch (jwtError) {
+      // Not an admin token, continue with user auth
+    }
 
     if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
       req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer', roles: ['farmer'] };
@@ -284,6 +324,27 @@ const authenticate = async (req, res, next) => {
   } catch (error) { console.error('Auth error:', error.message); res.status(401).json({ error: 'Authentication failed' }); }
 };
 
+// Admin-only middleware
+const adminAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'agriagent-secret-key');
+    
+    if (decoded.type !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+    
+    const adminUser = await Admin.findById(decoded.adminId);
+    if (!adminUser?.isActive) return res.status(401).json({ error: 'Admin account disabled' });
+    
+    req.admin = adminUser;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Authentication failed' });
+  }
+};
+
 // ==================== HELPER ====================
 const calculateDistance = (lat1, lng1, lat2, lng2) => {
   if (!lat1 || !lng1 || !lat2 || !lng2) return 999;
@@ -323,6 +384,554 @@ app.get('/health', async (req, res) => {
 });
 app.get('/', (req, res) => res.json({ message: 'AgriAgent API', version: '1.0.0' }));
 
+// ==================== ADMIN AUTH ROUTES ====================
+// Admin Login
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    
+    const adminUser = await Admin.findOne({ 
+      $or: [{ username }, { email: username }],
+      isActive: true 
+    });
+    
+    if (!adminUser) return res.status(401).json({ error: 'Invalid credentials' });
+    
+    const isMatch = await adminUser.comparePassword(password);
+    if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+    
+    adminUser.lastLogin = new Date();
+    await adminUser.save();
+    
+    const token = jwt.sign(
+      { adminId: adminUser._id, role: adminUser.role, type: 'admin' },
+      process.env.JWT_SECRET || 'agriagent-secret-key',
+      { expiresIn: '12h' }
+    );
+    
+    res.json({ 
+      success: true, 
+      token,
+      admin: {
+        id: adminUser._id,
+        username: adminUser.username,
+        email: adminUser.email,
+        role: adminUser.role
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin session check
+app.get('/api/admin/session', adminAuth, async (req, res) => {
+  res.json({ 
+    success: true, 
+    admin: {
+      id: req.admin._id,
+      username: req.admin.username,
+      email: req.admin.email,
+      role: req.admin.role
+    }
+  });
+});
+
+// Create initial admin (run once with setup key)
+app.post('/api/admin/setup', async (req, res) => {
+  try {
+    const { setupKey, username, password, email } = req.body;
+    
+    // Verify setup key matches env variable
+    if (setupKey !== process.env.ADMIN_SETUP_KEY) {
+      return res.status(403).json({ error: 'Invalid setup key' });
+    }
+    
+    // Check if admin already exists
+    const existingAdmin = await Admin.findOne({ $or: [{ username }, { email }] });
+    if (existingAdmin) return res.status(400).json({ error: 'Admin already exists' });
+    
+    const adminUser = await Admin.create({ 
+      username, 
+      password, 
+      email, 
+      role: 'superadmin' 
+    });
+    
+    res.json({ 
+      success: true, 
+      message: 'Admin created successfully',
+      admin: {
+        id: adminUser._id,
+        username: adminUser.username,
+        email: adminUser.email,
+        role: adminUser.role
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Change admin password
+app.put('/api/admin/change-password', adminAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new password required' });
+    }
+    
+    const isMatch = await req.admin.comparePassword(currentPassword);
+    if (!isMatch) return res.status(401).json({ error: 'Current password is incorrect' });
+    
+    req.admin.password = newPassword;
+    await req.admin.save();
+    
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADMIN MANAGEMENT ROUTES ====================
+
+// Get dashboard stats
+app.get('/api/admin/stats', adminAuth, async (req, res) => {
+  try {
+    const [
+      totalUsers, 
+      activeLabourers, 
+      totalEquipment, 
+      totalProduce,
+      pendingPayments, 
+      totalAds, 
+      activeAds,
+      totalBookings,
+      pendingReports
+    ] = await Promise.all([
+      User.countDocuments({ isActive: true }),
+      User.countDocuments({ isActive: true, roles: 'labourer', 'labourerDetails.isAvailable': true }),
+      Equipment.countDocuments({ isActive: true }),
+      Produce.countDocuments({ isActive: true, isAvailable: true }),
+      Payment.countDocuments({ status: 'pending_verification' }),
+      Ad.countDocuments(),
+      Ad.countDocuments({ status: 'active' }),
+      Booking.countDocuments({ status: 'pending' }),
+      Report.countDocuments({ status: 'pending' })
+    ]);
+    
+    res.json({
+      success: true,
+      stats: {
+        totalUsers, 
+        activeLabourers, 
+        totalEquipment, 
+        totalProduce,
+        pendingPayments, 
+        totalAds, 
+        activeAds,
+        totalBookings,
+        pendingReports
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all users (admin only)
+app.get('/api/admin/users', adminAuth, async (req, res) => {
+  try {
+    const { search, role, page = 1, limit = 20 } = req.query;
+    const query = { isActive: true };
+    
+    if (search) {
+      query.$or = [
+        { 'profile.name': { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { 'profile.phone': { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    if (role) query.roles = role;
+    
+    const total = await User.countDocuments(query);
+    const users = await User.find(query)
+      .select('-__v')
+      .sort('-createdAt')
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    
+    res.json({ 
+      success: true, 
+      users,
+      pagination: {
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / limit),
+        limit: parseInt(limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get single user details
+app.get('/api/admin/users/:id', adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-__v');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    // Get user's equipment, produce, bookings
+    const [equipment, produce, bookings] = await Promise.all([
+      Equipment.find({ ownerId: user._id }),
+      Produce.find({ farmerId: user._id }),
+      Booking.find({ $or: [{ renterId: user._id }, { ownerId: user._id }] })
+    ]);
+    
+    res.json({ 
+      success: true, 
+      user,
+      details: {
+        equipmentCount: equipment.length,
+        produceCount: produce.length,
+        bookingCount: bookings.length
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Toggle user active status
+app.put('/api/admin/users/:id/toggle', adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    user.isActive = !user.isActive;
+    user.updatedAt = new Date();
+    await user.save();
+    
+    res.json({ success: true, isActive: user.isActive });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update user verification status
+app.put('/api/admin/users/:id/verify', adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    user.verification.isVerified = true;
+    user.verification.verifiedAt = new Date();
+    await user.save();
+    
+    res.json({ success: true, user });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADMIN AD MANAGEMENT ====================
+
+// Get all ads
+app.get('/api/admin/ads', adminAuth, async (req, res) => {
+  try {
+    const { status, type, page = 1, limit = 50 } = req.query;
+    const query = {};
+    
+    if (status) query.status = status;
+    if (type) query.type = type;
+    
+    const total = await Ad.countDocuments(query);
+    const ads = await Ad.find(query)
+      .populate('advertiserId', 'profile.name profile.phone email')
+      .sort('-createdAt')
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    
+    res.json({ 
+      success: true, 
+      ads,
+      pagination: {
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update ad status
+app.put('/api/admin/ads/:id/status', adminAuth, async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!['pending', 'active', 'paused', 'completed', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+    
+    const ad = await Ad.findByIdAndUpdate(
+      req.params.id,
+      { status, updatedAt: new Date() },
+      { new: true }
+    ).populate('advertiserId', 'profile.name email');
+    
+    if (!ad) return res.status(404).json({ error: 'Ad not found' });
+    
+    res.json({ success: true, ad });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADMIN PAYMENT MANAGEMENT ====================
+
+// Get all payments
+app.get('/api/admin/payments', adminAuth, async (req, res) => {
+  try {
+    const { status, page = 1, limit = 50 } = req.query;
+    const query = {};
+    
+    if (status) query.status = status;
+    
+    const total = await Payment.countDocuments(query);
+    const payments = await Payment.find(query)
+      .populate('userId', 'profile.name email profile.phone')
+      .populate('adId', 'title type budget')
+      .sort('-createdAt')
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    
+    res.json({ 
+      success: true, 
+      payments,
+      pagination: {
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verify payment
+app.put('/api/admin/payments/:id/verify', adminAuth, async (req, res) => {
+  try {
+    const payment = await Payment.findByIdAndUpdate(
+      req.params.id,
+      { 
+        status: 'completed', 
+        paidAt: new Date(),
+        updatedAt: new Date() 
+      },
+      { new: true }
+    );
+    
+    if (!payment) return res.status(404).json({ error: 'Payment not found' });
+    
+    // Activate associated ad
+    if (payment.adId) {
+      await Ad.findByIdAndUpdate(payment.adId, { 
+        status: 'active', 
+        paymentStatus: 'completed',
+        updatedAt: new Date()
+      });
+    }
+    
+    res.json({ success: true, payment });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reject payment
+app.put('/api/admin/payments/:id/reject', adminAuth, async (req, res) => {
+  try {
+    const payment = await Payment.findByIdAndUpdate(
+      req.params.id,
+      { 
+        status: 'failed', 
+        updatedAt: new Date() 
+      },
+      { new: true }
+    );
+    
+    if (!payment) return res.status(404).json({ error: 'Payment not found' });
+    
+    // Update associated ad payment status
+    if (payment.adId) {
+      await Ad.findByIdAndUpdate(payment.adId, { 
+        paymentStatus: 'failed',
+        updatedAt: new Date()
+      });
+    }
+    
+    res.json({ success: true, payment });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADMIN REPORT MANAGEMENT ====================
+
+// Get all reports
+app.get('/api/admin/reports', adminAuth, async (req, res) => {
+  try {
+    const { status, type, page = 1, limit = 50 } = req.query;
+    const query = {};
+    
+    if (status) query.status = status;
+    if (type) query.type = type;
+    
+    const total = await Report.countDocuments(query);
+    const reports = await Report.find(query)
+      .populate('reporterId', 'profile.name email')
+      .sort('-createdAt')
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    
+    res.json({ 
+      success: true, 
+      reports,
+      pagination: {
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update report status
+app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!['pending', 'reviewed', 'resolved'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+    
+    const report = await Report.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    ).populate('reporterId', 'profile.name email');
+    
+    if (!report) return res.status(404).json({ error: 'Report not found' });
+    
+    res.json({ success: true, report });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADMIN EQUIPMENT MANAGEMENT ====================
+
+// Get all equipment
+app.get('/api/admin/equipment', adminAuth, async (req, res) => {
+  try {
+    const { category, isVerified, page = 1, limit = 50 } = req.query;
+    const query = {};
+    
+    if (category) query.category = category;
+    if (isVerified !== undefined) query.isVerified = isVerified === 'true';
+    
+    const total = await Equipment.countDocuments(query);
+    const equipment = await Equipment.find(query)
+      .populate('ownerId', 'profile.name profile.phone email')
+      .sort('-createdAt')
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    
+    res.json({ 
+      success: true, 
+      equipment,
+      pagination: {
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verify equipment
+app.put('/api/admin/equipment/:id/verify', adminAuth, async (req, res) => {
+  try {
+    const equipment = await Equipment.findByIdAndUpdate(
+      req.params.id,
+      { isVerified: true },
+      { new: true }
+    );
+    
+    if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
+    
+    res.json({ success: true, equipment });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADMIN FERTILIZER SHOP MANAGEMENT ====================
+
+// Get all shops
+app.get('/api/admin/shops', adminAuth, async (req, res) => {
+  try {
+    const { isVerified, page = 1, limit = 50 } = req.query;
+    const query = {};
+    
+    if (isVerified !== undefined) query.isVerified = isVerified === 'true';
+    
+    const total = await FertilizerShop.countDocuments(query);
+    const shops = await FertilizerShop.find(query)
+      .populate('addedBy', 'profile.name email')
+      .sort('-createdAt')
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+    
+    res.json({ 
+      success: true, 
+      shops,
+      pagination: {
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verify shop
+app.put('/api/admin/shops/:id/verify', adminAuth, async (req, res) => {
+  try {
+    const shop = await FertilizerShop.findByIdAndUpdate(
+      req.params.id,
+      { isVerified: true, updatedAt: new Date() },
+      { new: true }
+    );
+    
+    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+    
+    res.json({ success: true, shop });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== AUTH ROUTES ====================
 app.get('/api/auth/google-mobile/callback', async (req, res) => {
   try {
@@ -340,7 +949,7 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
       user = await User.create({
         googleId: googleUser.sub, email: googleUser.email,
         profile: { name: googleUser.name, profileImage: googleUser.picture },
-        roles: ['farmer'], role: 'farmer', // ✅ Multi-role
+        roles: ['farmer'], role: 'farmer',
       });
     } else { if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); } }
     const appToken = jwt.sign({ userId: user._id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'agriagent-secret-key', { expiresIn: '30d' });
@@ -376,7 +985,6 @@ app.post('/api/auth/google-mobile', async (req, res) => {
 app.get('/api/auth/session', authenticate, async (req, res) => res.json({ success: true, user: req.user }));
 app.get('/api/auth/me', authenticate, async (req, res) => res.json({ success: true, user: req.user }));
 
-// ✅ Updated role endpoint for multi-role
 app.put('/api/auth/role', authenticate, async (req, res) => {
   try {
     const { role } = req.body;
@@ -425,15 +1033,18 @@ app.get('/api/equipment', async (req, res) => {
   const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
   res.json({ success: true, equipment });
 });
+
 app.get('/api/equipment/:id', async (req, res) => {
   const equipment = await Equipment.findById(req.params.id).populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
   if (!equipment) return res.status(404).json({ error: 'Not found' });
   res.json({ success: true, equipment });
 });
+
 app.post('/api/equipment', authenticate, async (req, res) => {
   const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
   res.status(201).json({ success: true, equipment });
 });
+
 app.put('/api/equipment/:id', authenticate, async (req, res) => {
   const equipment = await Equipment.findById(req.params.id);
   if (!equipment) return res.status(404).json({ error: 'Not found' });
@@ -441,6 +1052,7 @@ app.put('/api/equipment/:id', authenticate, async (req, res) => {
   Object.assign(equipment, req.body); await equipment.save();
   res.json({ success: true, equipment });
 });
+
 app.delete('/api/equipment/:id', authenticate, async (req, res) => {
   const equipment = await Equipment.findById(req.params.id);
   if (!equipment) return res.status(404).json({ error: 'Not found' });
@@ -459,11 +1071,13 @@ app.get('/api/produce', async (req, res) => {
   const produce = await Produce.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
   res.json({ success: true, produce });
 });
+
 app.get('/api/produce/:id', async (req, res) => {
   const produce = await Produce.findById(req.params.id).populate('farmerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
   if (!produce) return res.status(404).json({ error: 'Not found' });
   res.json({ success: true, produce });
 });
+
 app.post('/api/produce', authenticate, async (req, res) => {
   const produce = await Produce.create({ ...req.body, farmerId: req.user._id });
   res.status(201).json({ success: true, produce });
@@ -474,10 +1088,12 @@ app.get('/api/bookings', authenticate, async (req, res) => {
   const bookings = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }).sort('-createdAt');
   res.json({ success: true, bookings });
 });
+
 app.post('/api/bookings', authenticate, async (req, res) => {
   const booking = await Booking.create({ ...req.body, renterId: req.user._id });
   res.status(201).json({ success: true, booking });
 });
+
 app.put('/api/bookings/:id', authenticate, async (req, res) => {
   const booking = await Booking.findById(req.params.id);
   if (!booking) return res.status(404).json({ error: 'Not found' });
@@ -495,21 +1111,25 @@ app.get('/api/problems', async (req, res) => {
   const problems = await Problem.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes').limit(50);
   res.json({ success: true, problems });
 });
+
 app.get('/api/problems/:id', async (req, res) => {
   const problem = await Problem.findById(req.params.id).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings');
   if (!problem) return res.status(404).json({ error: 'Not found' });
   const solutions = await Solution.find({ problemId: problem._id, isActive: true }).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes');
   res.json({ success: true, problem, solutions });
 });
+
 app.post('/api/problems', authenticate, async (req, res) => {
   const problem = await Problem.create({ ...req.body, farmerId: req.user._id });
   res.status(201).json({ success: true, problem });
 });
+
 app.post('/api/problems/:id/solutions', authenticate, async (req, res) => {
   const solution = await Solution.create({ problemId: req.params.id, farmerId: req.user._id, ...req.body });
   await Problem.findByIdAndUpdate(req.params.id, { $inc: { solutionCount: 1 } });
   res.status(201).json({ success: true, solution });
 });
+
 app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
   const problem = await Problem.findById(req.params.id);
   if (!problem) return res.status(404).json({ error: 'Not found' });
@@ -519,6 +1139,7 @@ app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
   await problem.save();
   res.json({ success: true, upvotes: problem.upvotes });
 });
+
 app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
   const solution = await Solution.findById(req.params.id);
   if (!solution) return res.status(404).json({ error: 'Not found' });
@@ -529,7 +1150,7 @@ app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
   res.json({ success: true, upvotes: solution.upvotes });
 });
 
-// ==================== LABOURERS (Multi-role) ====================
+// ==================== LABOURERS ====================
 app.get('/api/labourers/nearby', async (req, res) => {
   const { lat, lng, radius = 10, crop } = req.query;
   const query = { roles: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
@@ -557,7 +1178,7 @@ app.get('/api/labourers/:id', async (req, res) => {
   res.json({ success: true, labourer });
 });
 
-// ==================== CONTRACTORS (Multi-role) ====================
+// ==================== CONTRACTORS ====================
 app.get('/api/contractors', async (req, res) => {
   const { crop } = req.query;
   const query = { roles: 'contractor', isActive: true };
@@ -593,6 +1214,7 @@ app.get('/api/fertilizer-shops/nearby', async (req, res) => {
   }
   res.json({ success: true, shops });
 });
+
 app.get('/api/fertilizer-shops', async (req, res) => {
   const { search, district } = req.query;
   const query = { isActive: true };
@@ -601,15 +1223,18 @@ app.get('/api/fertilizer-shops', async (req, res) => {
   const shops = await FertilizerShop.find(query).sort('-rating').limit(100);
   res.json({ success: true, shops });
 });
+
 app.get('/api/fertilizer-shops/:id', async (req, res) => {
   const shop = await FertilizerShop.findById(req.params.id);
   if (!shop) return res.status(404).json({ error: 'Not found' });
   res.json({ success: true, shop });
 });
+
 app.post('/api/fertilizer-shops', authenticate, async (req, res) => {
   const shop = await FertilizerShop.create({ ...req.body, addedBy: req.user._id });
   res.status(201).json({ success: true, shop });
 });
+
 app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   const shop = await FertilizerShop.findById(req.params.id);
   if (!shop) return res.status(404).json({ error: 'Not found' });
@@ -617,6 +1242,7 @@ app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   Object.assign(shop, req.body); shop.updatedAt = Date.now(); await shop.save();
   res.json({ success: true, shop });
 });
+
 app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
   const { rating } = req.body;
   if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating 1-5 required' });
@@ -632,6 +1258,7 @@ app.get('/api/ads/my-ads', authenticate, async (req, res) => {
   const ads = await Ad.find({ advertiserId: req.user._id }).sort('-createdAt');
   res.json({ success: true, ads });
 });
+
 app.get('/api/ads/active', async (req, res) => {
   const { placement, limit = 5 } = req.query;
   const query = { status: 'active', isActive: true, startDate: { $lte: new Date() }, endDate: { $gte: new Date() } };
@@ -640,11 +1267,13 @@ app.get('/api/ads/active', async (req, res) => {
   await Ad.updateMany({ _id: { $in: ads.map(ad => ad._id) } }, { $inc: { impressions: 1 } });
   res.json({ success: true, ads });
 });
+
 app.post('/api/ads', authenticate, async (req, res) => {
   const adData = { ...req.body, advertiserId: req.user._id, advertiserName: req.user.profile?.name, advertiserPhone: req.user.profile?.phone, startDate: new Date(), endDate: new Date(Date.now() + req.body.duration * 24 * 60 * 60 * 1000) };
   const ad = await Ad.create(adData);
   res.status(201).json({ success: true, ad });
 });
+
 app.put('/api/ads/:id/status', authenticate, async (req, res) => {
   const ad = await Ad.findById(req.params.id);
   if (!ad) return res.status(404).json({ error: 'Not found' });
@@ -652,6 +1281,7 @@ app.put('/api/ads/:id/status', authenticate, async (req, res) => {
   ad.status = req.body.status; ad.updatedAt = Date.now(); await ad.save();
   res.json({ success: true, ad });
 });
+
 app.post('/api/ads/:id/click', async (req, res) => {
   await Ad.findByIdAndUpdate(req.params.id, { $inc: { clicks: 1 } });
   res.json({ success: true });
@@ -661,12 +1291,14 @@ app.post('/api/ads/:id/click', async (req, res) => {
 app.get('/api/payments/upi-details', async (req, res) => {
   res.json({ success: true, upiId: process.env.MERCHANT_UPI_ID || 'siddhikreddy@ibl', merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies', qrCodeUrl: process.env.QR_CODE_URL || '' });
 });
+
 app.post('/api/payments/upi', authenticate, async (req, res) => {
   const { adId, amount } = req.body;
   if (!adId || !amount) return res.status(400).json({ error: 'Ad ID and amount required' });
   const payment = await Payment.create({ userId: req.user._id, adId, amount, paymentMethod: 'upi', status: 'pending' });
   res.json({ success: true, paymentId: payment._id });
 });
+
 app.post('/api/payments/confirm-payment', authenticate, async (req, res) => {
   const { adId, utrNumber } = req.body;
   if (!adId) return res.status(400).json({ error: 'Ad ID required' });
@@ -682,6 +1314,7 @@ app.post('/api/payments/confirm-payment', authenticate, async (req, res) => {
   await Ad.findByIdAndUpdate(adId, { paymentStatus: 'pending_verification' });
   res.json({ success: true, message: 'Payment submitted for verification' });
 });
+
 app.put('/api/payments/:id/verify', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const payment = await Payment.findById(req.params.id);
@@ -720,3 +1353,5 @@ app.use((err, req, res, next) => { console.error('Server error:', err); res.stat
 // ==================== START ====================
 const PORT = process.env.PORT || 5000;
 connectDB().then(() => app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`)));
+
+module.exports = app;
