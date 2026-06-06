@@ -1083,6 +1083,23 @@ app.post('/api/produce', authenticate, async (req, res) => {
   res.status(201).json({ success: true, produce });
 });
 
+app.put('/api/produce/:id', authenticate, async (req, res) => {
+  const produce = await Produce.findById(req.params.id);
+  if (!produce) return res.status(404).json({ error: 'Not found' });
+  if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  Object.assign(produce, req.body); await produce.save();
+  res.json({ success: true, produce });
+});
+
+app.delete('/api/produce/:id', authenticate, async (req, res) => {
+  const produce = await Produce.findById(req.params.id);
+  if (!produce) return res.status(404).json({ error: 'Not found' });
+  if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+  produce.isActive = false;
+  await produce.save();
+  res.json({ success: true, message: 'Produce listing removed' });
+});
+
 // ==================== BOOKINGS ====================
 app.get('/api/bookings', authenticate, async (req, res) => {
   const bookings = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }).sort('-createdAt');
@@ -1103,51 +1120,172 @@ app.put('/api/bookings/:id', authenticate, async (req, res) => {
 });
 
 // ==================== PROBLEMS & SOLUTIONS ====================
+// GET all problems
 app.get('/api/problems', async (req, res) => {
-  const { crop, search } = req.query;
-  const query = { isActive: true };
-  if (crop && crop !== 'all') query.cropType = crop;
-  if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
-  const problems = await Problem.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes').limit(50);
-  res.json({ success: true, problems });
+  try {
+    const { crop, search } = req.query;
+    const query = { isActive: true };
+    if (crop && crop !== 'all') query.cropType = crop;
+    if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
+    const problems = await Problem.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes').limit(50);
+    res.json({ success: true, problems });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// GET single problem with solutions
 app.get('/api/problems/:id', async (req, res) => {
-  const problem = await Problem.findById(req.params.id).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings');
-  if (!problem) return res.status(404).json({ error: 'Not found' });
-  const solutions = await Solution.find({ problemId: problem._id, isActive: true }).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes');
-  res.json({ success: true, problem, solutions });
+  try {
+    const problem = await Problem.findById(req.params.id).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings');
+    if (!problem) return res.status(404).json({ error: 'Not found' });
+    const solutions = await Solution.find({ problemId: problem._id, isActive: true }).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes');
+    res.json({ success: true, problem, solutions });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// CREATE problem
 app.post('/api/problems', authenticate, async (req, res) => {
-  const problem = await Problem.create({ ...req.body, farmerId: req.user._id });
-  res.status(201).json({ success: true, problem });
+  try {
+    const problem = await Problem.create({ ...req.body, farmerId: req.user._id });
+    res.status(201).json({ success: true, problem });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-app.post('/api/problems/:id/solutions', authenticate, async (req, res) => {
-  const solution = await Solution.create({ problemId: req.params.id, farmerId: req.user._id, ...req.body });
-  await Problem.findByIdAndUpdate(req.params.id, { $inc: { solutionCount: 1 } });
-  res.status(201).json({ success: true, solution });
+// UPDATE problem
+app.put('/api/problems/:id', authenticate, async (req, res) => {
+  try {
+    const problem = await Problem.findById(req.params.id);
+    if (!problem) return res.status(404).json({ error: 'Problem not found' });
+    
+    // Only the creator or admin can update
+    if (problem.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    
+    Object.assign(problem, req.body);
+    await problem.save();
+    
+    res.json({ success: true, problem });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// DELETE problem (soft delete)
+app.delete('/api/problems/:id', authenticate, async (req, res) => {
+  try {
+    const problem = await Problem.findById(req.params.id);
+    
+    if (!problem) {
+      return res.status(404).json({ error: 'Problem not found' });
+    }
+    
+    // Only the creator or admin can delete
+    if (problem.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    
+    // Soft delete - mark as inactive
+    problem.isActive = false;
+    await problem.save();
+    
+    res.json({ success: true, message: 'Problem deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Upvote problem
 app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
-  const problem = await Problem.findById(req.params.id);
-  if (!problem) return res.status(404).json({ error: 'Not found' });
-  const hasUpvoted = problem.upvotedBy.includes(req.user._id);
-  if (hasUpvoted) { problem.upvotes -= 1; problem.upvotedBy.pull(req.user._id); }
-  else { problem.upvotes += 1; problem.upvotedBy.push(req.user._id); }
-  await problem.save();
-  res.json({ success: true, upvotes: problem.upvotes });
+  try {
+    const problem = await Problem.findById(req.params.id);
+    if (!problem) return res.status(404).json({ error: 'Not found' });
+    const hasUpvoted = problem.upvotedBy.includes(req.user._id);
+    if (hasUpvoted) { problem.upvotes -= 1; problem.upvotedBy.pull(req.user._id); }
+    else { problem.upvotes += 1; problem.upvotedBy.push(req.user._id); }
+    await problem.save();
+    res.json({ success: true, upvotes: problem.upvotes });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// CREATE solution
+app.post('/api/problems/:id/solutions', authenticate, async (req, res) => {
+  try {
+    const solution = await Solution.create({ problemId: req.params.id, farmerId: req.user._id, ...req.body });
+    await Problem.findByIdAndUpdate(req.params.id, { $inc: { solutionCount: 1 } });
+    res.status(201).json({ success: true, solution });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// UPDATE solution
+app.put('/api/solutions/:id', authenticate, async (req, res) => {
+  try {
+    const solution = await Solution.findById(req.params.id);
+    if (!solution) return res.status(404).json({ error: 'Solution not found' });
+    
+    // Only the creator or admin can update
+    if (solution.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    
+    Object.assign(solution, req.body);
+    await solution.save();
+    
+    res.json({ success: true, solution });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE solution (soft delete)
+app.delete('/api/solutions/:id', authenticate, async (req, res) => {
+  try {
+    const solution = await Solution.findById(req.params.id);
+    
+    if (!solution) {
+      return res.status(404).json({ error: 'Solution not found' });
+    }
+    
+    // Only the creator or admin can delete
+    if (solution.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    
+    // Soft delete
+    solution.isActive = false;
+    await solution.save();
+    
+    // Decrement solution count on problem
+    await Problem.findByIdAndUpdate(solution.problemId, { $inc: { solutionCount: -1 } });
+    
+    res.json({ success: true, message: 'Solution deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Upvote solution
 app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
-  const solution = await Solution.findById(req.params.id);
-  if (!solution) return res.status(404).json({ error: 'Not found' });
-  const hasUpvoted = solution.upvotedBy.includes(req.user._id);
-  if (hasUpvoted) { solution.upvotes -= 1; solution.upvotedBy.pull(req.user._id); }
-  else { solution.upvotes += 1; solution.upvotedBy.push(req.user._id); }
-  await solution.save();
-  res.json({ success: true, upvotes: solution.upvotes });
+  try {
+    const solution = await Solution.findById(req.params.id);
+    if (!solution) return res.status(404).json({ error: 'Not found' });
+    const hasUpvoted = solution.upvotedBy.includes(req.user._id);
+    if (hasUpvoted) { solution.upvotes -= 1; solution.upvotedBy.pull(req.user._id); }
+    else { solution.upvotes += 1; solution.upvotedBy.push(req.user._id); }
+    await solution.save();
+    res.json({ success: true, upvotes: solution.upvotes });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ==================== LABOURERS ====================
