@@ -384,6 +384,97 @@ app.get('/health', async (req, res) => {
 });
 app.get('/', (req, res) => res.json({ message: 'AgriAgent API', version: '1.0.0' }));
 
+// ==================== WEATHER ====================
+// Weather endpoint using Open-Meteo (free, no API key required)
+app.get('/api/weather', async (req, res) => {
+  try {
+    const { lat, lng } = req.query;
+
+    if (!lat || !lng) {
+      return res.status(400).json({ error: 'Latitude and longitude required' });
+    }
+
+    // Fetch current weather + 5-day forecast from Open-Meteo
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,precipitation,rain,cloud_cover&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,rain_sum,weather_code,wind_speed_10m_max,sunrise,sunset,uv_index_max&timezone=auto&forecast_days=6`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!data.current) {
+      return res.status(500).json({ error: 'Failed to fetch weather data' });
+    }
+
+    // Weather code to description mapping
+    const weatherCodes = {
+      0:  { description: 'Clear Sky',                icon: 'clear' },
+      1:  { description: 'Mainly Clear',             icon: 'clear' },
+      2:  { description: 'Partly Cloudy',            icon: 'partly-cloudy' },
+      3:  { description: 'Overcast',                 icon: 'cloudy' },
+      45: { description: 'Foggy',                    icon: 'fog' },
+      48: { description: 'Depositing Rime Fog',      icon: 'fog' },
+      51: { description: 'Light Drizzle',            icon: 'drizzle' },
+      53: { description: 'Moderate Drizzle',         icon: 'drizzle' },
+      55: { description: 'Dense Drizzle',            icon: 'drizzle' },
+      61: { description: 'Slight Rain',              icon: 'rain' },
+      63: { description: 'Moderate Rain',            icon: 'rain' },
+      65: { description: 'Heavy Rain',               icon: 'heavy-rain' },
+      71: { description: 'Slight Snow',              icon: 'snow' },
+      73: { description: 'Moderate Snow',            icon: 'snow' },
+      75: { description: 'Heavy Snow',               icon: 'snow' },
+      80: { description: 'Rain Showers',             icon: 'rain' },
+      81: { description: 'Moderate Rain Showers',    icon: 'rain' },
+      82: { description: 'Violent Rain Showers',     icon: 'heavy-rain' },
+      95: { description: 'Thunderstorm',             icon: 'thunderstorm' },
+      96: { description: 'Thunderstorm with Hail',   icon: 'thunderstorm' },
+      99: { description: 'Severe Thunderstorm',      icon: 'thunderstorm' },
+    };
+
+    // Format current weather
+    const current = {
+      temperature:  Math.round(data.current.temperature_2m),
+      feelsLike:    Math.round(data.current.apparent_temperature),
+      humidity:     data.current.relative_humidity_2m,
+      windSpeed:    data.current.wind_speed_10m,
+      windDirection: data.current.wind_direction_10m,
+      precipitation: data.current.precipitation,
+      rain:         data.current.rain,
+      cloudCover:   data.current.cloud_cover,
+      weatherCode:  data.current.weather_code,
+      weather:      weatherCodes[data.current.weather_code] || { description: 'Unknown', icon: 'cloudy' },
+    };
+
+    // Format daily forecast
+    const daily = data.daily.time.map((date, index) => ({
+      date,
+      dayName:        new Date(date).toLocaleDateString('en-US', { weekday: 'short' }),
+      dateFormatted:  new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      temperatureMax: Math.round(data.daily.temperature_2m_max[index]),
+      temperatureMin: Math.round(data.daily.temperature_2m_min[index]),
+      precipitation:  data.daily.precipitation_sum[index],
+      rainSum:        data.daily.rain_sum[index],
+      weatherCode:    data.daily.weather_code[index],
+      weather:        weatherCodes[data.daily.weather_code[index]] || { description: 'Unknown', icon: 'cloudy' },
+      windSpeedMax:   data.daily.wind_speed_10m_max[index],
+      sunrise:        data.daily.sunrise[index] ? data.daily.sunrise[index].split('T')[1]?.substring(0, 5) : null,
+      sunset:         data.daily.sunset[index]  ? data.daily.sunset[index].split('T')[1]?.substring(0, 5)  : null,
+      uvIndex:        data.daily.uv_index_max[index],
+    }));
+
+    res.json({
+      success: true,
+      current,
+      daily,
+      location: {
+        lat: parseFloat(lat),
+        lng: parseFloat(lng),
+      },
+    });
+  } catch (error) {
+    console.error('Weather API error:', error);
+    res.status(500).json({ error: 'Failed to fetch weather data' });
+  }
+});
+
 // ==================== ADMIN AUTH ROUTES ====================
 // Admin Login
 app.post('/api/admin/login', async (req, res) => {
