@@ -1,11 +1,18 @@
 FROM node:20-alpine
 
+# Install build dependencies for sharp
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    vips-dev
+
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies (use npm install instead of npm ci for missing lockfile)
+# Install dependencies
 RUN npm install --omit=dev
 
 # Copy application code
