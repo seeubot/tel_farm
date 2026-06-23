@@ -364,6 +364,9 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
 };
 
 // ==================== IMAGE UPLOAD ROUTES (MongoDB GridFS) ====================
+// FIX: GridFS 'finish' event does NOT pass the file object as an argument.
+//      Capture uploadStream.id BEFORE calling .end() and use it in the callback.
+
 app.post('/api/upload/image', authenticate, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -377,21 +380,31 @@ app.post('/api/upload/image', authenticate, upload.single('file'), async (req, r
     const filename = `${Date.now()}_${crypto.randomBytes(8).toString('hex')}.webp`;
     const uploadStream = gridfsBucket.openUploadStream(filename, {
       contentType: 'image/webp',
-      metadata: { uploadedBy: req.user._id.toString(), originalName: req.file.originalname, size: optimizedBuffer.length, createdAt: new Date() }
+      metadata: {
+        uploadedBy: req.user._id.toString(),
+        originalName: req.file.originalname,
+        size: optimizedBuffer.length,
+        createdAt: new Date(),
+      },
+    });
+
+    // ✅ Capture the file ID before streaming — 'finish' event has no arguments
+    const fileId = uploadStream.id;
+
+    uploadStream.on('finish', () => {
+      const imageUrl = `${process.env.API_BASE_URL}/api/images/${fileId}`;
+      res.json({ success: true, url: imageUrl, id: fileId, size: optimizedBuffer.length });
+    });
+
+    uploadStream.on('error', (error) => {
+      console.error('Upload stream error:', error);
+      if (!res.headersSent) res.status(500).json({ error: 'Upload failed' });
     });
 
     uploadStream.end(optimizedBuffer);
-    uploadStream.on('finish', (file) => {
-      const imageUrl = `${process.env.API_BASE_URL}/api/images/${file._id}`;
-      res.json({ success: true, url: imageUrl, id: file._id, size: optimizedBuffer.length });
-    });
-    uploadStream.on('error', (error) => {
-      console.error('Upload stream error:', error);
-      res.status(500).json({ error: 'Upload failed' });
-    });
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: 'Upload failed: ' + error.message });
+    if (!res.headersSent) res.status(500).json({ error: 'Upload failed: ' + error.message });
   }
 });
 
@@ -401,18 +414,34 @@ app.post('/api/upload/images', authenticate, upload.array('files', 5), async (re
     if (!gridfsBucket) return res.status(503).json({ error: 'Image service not ready' });
 
     const urls = await Promise.all(req.files.map(async (file) => {
-      const optimizedBuffer = await sharp(file.buffer).resize(1200, 1200, { fit: 'inside', withoutEnlargement: true }).webp({ quality: 80 }).toBuffer();
+      const optimizedBuffer = await sharp(file.buffer)
+        .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 80 })
+        .toBuffer();
+
       const filename = `${Date.now()}_${crypto.randomBytes(8).toString('hex')}.webp`;
+
       return new Promise((resolve, reject) => {
-        const uploadStream = gridfsBucket.openUploadStream(filename, { contentType: 'image/webp', metadata: { uploadedBy: req.user._id.toString() } });
-        uploadStream.end(optimizedBuffer);
-        uploadStream.on('finish', (file) => resolve(`${process.env.API_BASE_URL}/api/images/${file._id}`));
+        const uploadStream = gridfsBucket.openUploadStream(filename, {
+          contentType: 'image/webp',
+          metadata: { uploadedBy: req.user._id.toString() },
+        });
+
+        // ✅ Capture the file ID before streaming — 'finish' event has no arguments
+        const fileId = uploadStream.id;
+
+        uploadStream.on('finish', () =>
+          resolve(`${process.env.API_BASE_URL}/api/images/${fileId}`)
+        );
         uploadStream.on('error', reject);
+        uploadStream.end(optimizedBuffer);
       });
     }));
 
     res.json({ success: true, urls });
-  } catch (error) { res.status(500).json({ error: 'Upload failed: ' + error.message }); }
+  } catch (error) {
+    res.status(500).json({ error: 'Upload failed: ' + error.message });
+  }
 });
 
 app.get('/api/images/:id', async (req, res) => {
