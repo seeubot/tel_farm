@@ -19,7 +19,9 @@
     "form-data": "^4.0.0",
     "axios": "^1.6.0",
     "jsonwebtoken": "^9.0.2",
-    "google-auth-library": "^9.0.0"
+    "google-auth-library": "^9.0.0",
+    "sharp": "^0.33.2",
+    "mongodb": "^6.3.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
