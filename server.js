@@ -22,9 +22,9 @@ const connectDB = async () => {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 10000,
     });
-    console.log('✅ MongoDB Connected');
+    console.log('MongoDB Connected');
   } catch (error) {
-    console.error('❌ MongoDB Error:', error.message);
+    console.error('MongoDB Error:', error.message);
     process.exit(1);
   }
 };
@@ -40,9 +40,9 @@ const connectImageDB = async () => {
     await conn.asPromise();
     imageDb = conn.db;
     gridfsBucket = new GridFSBucket(imageDb, { bucketName: 'agriagent_images' });
-    console.log('✅ Image MongoDB Connected (movie db)');
+    console.log('Image MongoDB Connected (movie db)');
   } catch (error) {
-    console.error('❌ Image MongoDB Error:', error.message);
+    console.error('Image MongoDB Error:', error.message);
   }
 };
 
@@ -59,12 +59,12 @@ if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       }),
     });
-    console.log('✅ Firebase Admin initialized');
+    console.log('Firebase Admin initialized');
   } catch (error) {
-    console.error('❌ Firebase Admin error:', error.message);
+    console.error('Firebase Admin error:', error.message);
   }
 } else {
-  console.warn('⚠️  Firebase Admin credentials missing. Running in demo mode.');
+  console.warn('Firebase Admin credentials missing. Running in demo mode.');
 }
 
 // ==================== GOOGLE OAUTH CLIENT ====================
@@ -118,7 +118,13 @@ const userSchema = new mongoose.Schema({
     verifiedAt: Date,
     documents: { aadharUrl: String, panUrl: String },
   },
-  labourerDetails: { age: Number, experience: Number, skills: [String], isAvailable: { type: Boolean, default: true } },
+  labourerDetails: { 
+    age: Number, 
+    experience: Number, 
+    skills: [String], 
+    isAvailable: { type: Boolean, default: true },
+    serviceRadius: { type: Number, default: 10 }
+  },
   contractorDetails: { companyName: String, gstNumber: String, teamSize: String, crops: [String], isActive: { type: Boolean, default: true } },
   ratings: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
   isActive: { type: Boolean, default: true },
@@ -364,9 +370,6 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
 };
 
 // ==================== IMAGE UPLOAD ROUTES (MongoDB GridFS) ====================
-// FIX: GridFS 'finish' event does NOT pass the file object as an argument.
-//      Capture uploadStream.id BEFORE calling .end() and use it in the callback.
-
 app.post('/api/upload/image', authenticate, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -388,7 +391,6 @@ app.post('/api/upload/image', authenticate, upload.single('file'), async (req, r
       },
     });
 
-    // ✅ Capture the file ID before streaming — 'finish' event has no arguments
     const fileId = uploadStream.id;
 
     uploadStream.on('finish', () => {
@@ -427,7 +429,6 @@ app.post('/api/upload/images', authenticate, upload.array('files', 5), async (re
           metadata: { uploadedBy: req.user._id.toString() },
         });
 
-        // ✅ Capture the file ID before streaming — 'finish' event has no arguments
         const fileId = uploadStream.id;
 
         uploadStream.on('finish', () =>
@@ -789,10 +790,11 @@ app.delete('/api/users/delete-account', authenticate, async (req, res) => {
 
 // ==================== EQUIPMENT ====================
 app.get('/api/equipment', async (req, res) => {
-  const { category, search } = req.query;
-  const query = { 'availability.isAvailable': true, isActive: true };
+  const { category, search, owner } = req.query;
+  const query = { isActive: true };
   if (category && category !== 'all') query.category = category;
   if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
+  if (owner) query.ownerId = owner;
   const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
   res.json({ success: true, equipment });
 });
@@ -826,11 +828,12 @@ app.delete('/api/equipment/:id', authenticate, async (req, res) => {
 
 // ==================== PRODUCE ====================
 app.get('/api/produce', async (req, res) => {
-  const { crop, search, organic } = req.query;
-  const query = { isAvailable: true, isActive: true };
+  const { crop, search, organic, farmer } = req.query;
+  const query = { isActive: true };
   if (crop && crop !== 'all') query.cropName = crop;
   if (search) query.$or = [{ cropName: { $regex: search, $options: 'i' } }, { variety: { $regex: search, $options: 'i' } }];
   if (organic === 'true') query.organic = true;
+  if (farmer) query.farmerId = farmer;
   const produce = await Produce.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
   res.json({ success: true, produce });
 });
@@ -983,25 +986,75 @@ app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== LABOURERS ====================
+// ==================== LABOURERS (UPDATED) ====================
 app.get('/api/labourers/nearby', async (req, res) => {
-  const { lat, lng, radius = 10, crop } = req.query;
+  const { lat, lng, radius = 10, crop, village } = req.query;
   const query = { roles: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
-  if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
-  let labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(50);
-  if (lat && lng) {
-    labourers = labourers.map(l => ({ ...l.toObject(), distance: calculateDistance(lat, lng, l.profile.location?.lat, l.profile.location?.lng) }))
-      .filter(l => l.distance <= Number(radius)).sort((a, b) => a.distance - b.distance);
+  
+  if (crop && crop !== 'all' && crop !== 'All crops') query['labourerDetails.skills'] = crop;
+  
+  if (village) {
+    query.$or = [
+      { 'profile.location.village': { $regex: village, $options: 'i' } },
+      { 'profile.location.address': { $regex: village, $options: 'i' } },
+      { 'profile.location.district': { $regex: village, $options: 'i' } }
+    ];
   }
+  
+  let labourers = await User.find(query)
+    .select('profile labourerDetails ratings verification email')
+    .sort('-ratings.average')
+    .limit(100);
+  
+  if (lat && lng) {
+    labourers = labourers.map(l => {
+      const labourerLat = l.profile.location?.lat;
+      const labourerLng = l.profile.location?.lng;
+      const distance = calculateDistance(
+        parseFloat(lat), 
+        parseFloat(lng), 
+        labourerLat, 
+        labourerLng
+      );
+      
+      const serviceRadius = l.labourerDetails?.serviceRadius || 10;
+      const searchRadius = Number(radius);
+      const effectiveRadius = Math.min(serviceRadius, searchRadius);
+      
+      return { 
+        ...l.toObject(), 
+        distance,
+        serviceRadius,
+        withinRange: distance <= effectiveRadius
+      };
+    })
+    .filter(l => l.withinRange)
+    .sort((a, b) => a.distance - b.distance);
+  }
+  
   res.json({ success: true, labourers });
 });
 
 app.get('/api/labourers', async (req, res) => {
-  const { crop, isAvailable } = req.query;
+  const { crop, isAvailable, village } = req.query;
   const query = { roles: 'labourer', isActive: true };
-  if (crop && crop !== 'all') query['labourerDetails.skills'] = crop;
+  
+  if (crop && crop !== 'all' && crop !== 'All crops') query['labourerDetails.skills'] = crop;
   if (isAvailable !== undefined) query['labourerDetails.isAvailable'] = isAvailable === 'true';
-  const labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(100);
+  
+  if (village) {
+    query.$or = [
+      { 'profile.location.village': { $regex: village, $options: 'i' } },
+      { 'profile.location.address': { $regex: village, $options: 'i' } },
+      { 'profile.location.district': { $regex: village, $options: 'i' } }
+    ];
+  }
+  
+  const labourers = await User.find(query)
+    .select('profile labourerDetails ratings verification email')
+    .sort('-ratings.average')
+    .limit(100);
+  
   res.json({ success: true, labourers });
 });
 
@@ -1161,7 +1214,7 @@ app.get('/api/debug/labourers', async (req, res) => {
   try {
     const count = await User.countDocuments({ roles: 'labourer', isActive: true });
     const labourers = await User.find({ roles: 'labourer', isActive: true }).select('profile.name profile.phone profile.location labourerDetails roles').limit(20);
-    res.json({ success: true, totalLabourers: count, labourers: labourers.map(l => ({ id: l._id, name: l.profile?.name, phone: l.profile?.phone, hasLocation: !!(l.profile?.location?.lat && l.profile?.location?.lng), lat: l.profile?.location?.lat, lng: l.profile?.location?.lng, skills: l.labourerDetails?.skills || [], isAvailable: l.labourerDetails?.isAvailable, roles: l.roles })) });
+    res.json({ success: true, totalLabourers: count, labourers: labourers.map(l => ({ id: l._id, name: l.profile?.name, phone: l.profile?.phone, hasLocation: !!(l.profile?.location?.lat && l.profile?.location?.lng), lat: l.profile?.location?.lat, lng: l.profile?.location?.lng, skills: l.labourerDetails?.skills || [], isAvailable: l.labourerDetails?.isAvailable, serviceRadius: l.labourerDetails?.serviceRadius || 10, roles: l.roles })) });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1189,9 +1242,9 @@ const startServer = async () => {
   await connectDB();
   await connectImageDB();
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 AgriAgent Server running on port ${PORT}`);
-    console.log(`📸 Image Storage: MongoDB GridFS (movie db)`);
-    console.log(`💚 Health: http://localhost:${PORT}/health`);
+    console.log(`AgriAgent Server running on port ${PORT}`);
+    console.log(`Image Storage: MongoDB GridFS (movie db)`);
+    console.log(`Health: http://localhost:${PORT}/health`);
   });
 };
 
