@@ -15,37 +15,6 @@ require('dotenv').config();
 const app = express();
 app.set('trust proxy', 1);
 
-// ==================== REQUIRED ENV VARS (fail fast, no silent fallbacks) ====================
-const REQUIRED_ENV_VARS = [
-  'MONGODB_URI',
-  'IMAGE_MONGO_URI',
-  'JWT_SECRET',
-  'API_BASE_URL',
-  'ADMIN_SETUP_KEY',
-];
-
-const missingEnvVars = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
-if (missingEnvVars.length > 0) {
-  console.error(
-    `FATAL: Missing required environment variables: ${missingEnvVars.join(', ')}`
-  );
-  process.exit(1);
-}
-
-const JWT_SECRET = process.env.JWT_SECRET;
-
-// Allowed origins for CORS — set ALLOWED_ORIGINS as a comma-separated list in env,
-// e.g. "https://app.example.com,exp://your-expo-host"
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
-
-// Debug routes are OFF by default. Only settable in non-production, and always
-// require adminAuth even when enabled (see routes below).
-const DEBUG_ROUTES_ENABLED =
-  process.env.ENABLE_DEBUG_ROUTES === 'true' && process.env.NODE_ENV !== 'production';
-
 // ==================== DATABASE CONNECTION ====================
 const connectDB = async () => {
   try {
@@ -60,17 +29,18 @@ const connectDB = async () => {
   }
 };
 
-// ==================== IMAGE DATABASE ====================
+// ==================== IMAGE DATABASE (Movie MongoDB) ====================
+const IMAGE_MONGO_URI = process.env.IMAGE_MONGO_URI || 'mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?appName=movie';
 let imageDb;
 let gridfsBucket;
 
 const connectImageDB = async () => {
   try {
-    const conn = mongoose.createConnection(process.env.IMAGE_MONGO_URI);
+    const conn = mongoose.createConnection(IMAGE_MONGO_URI);
     await conn.asPromise();
     imageDb = conn.db;
     gridfsBucket = new GridFSBucket(imageDb, { bucketName: 'agriagent_images' });
-    console.log('Image MongoDB Connected');
+    console.log('Image MongoDB Connected (movie db)');
   } catch (error) {
     console.error('Image MongoDB Error:', error.message);
   }
@@ -94,7 +64,7 @@ if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
     console.error('Firebase Admin error:', error.message);
   }
 } else {
-  console.warn('Firebase Admin credentials missing. Firebase auth path disabled.');
+  console.warn('Firebase Admin credentials missing. Running in demo mode.');
 }
 
 // ==================== GOOGLE OAUTH CLIENT ====================
@@ -105,19 +75,10 @@ const googleOAuthClient = new OAuth2Client(
 
 // ==================== MIDDLEWARE ====================
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow non-browser tools / server-to-server calls with no Origin header
-      if (!origin) return callback(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-      return callback(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
-  })
-);
-
+app.use(cors({
+  origin: ['http://localhost:19000', 'http://localhost:19006', 'http://localhost:3000', 'exp://*', '*'],
+  credentials: true,
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -133,13 +94,6 @@ const upload = multer({
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Too many requests' } });
 app.use('/api/', limiter);
-
-// Tighter limiter for auth/login endpoints to slow down brute force / credential stuffing
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: 'Too many auth attempts, please try again later' },
-});
 
 // ==================== MODELS ====================
 const userSchema = new mongoose.Schema({
@@ -164,12 +118,12 @@ const userSchema = new mongoose.Schema({
     verifiedAt: Date,
     documents: { aadharUrl: String, panUrl: String },
   },
-  labourerDetails: {
-    age: Number,
-    experience: Number,
-    skills: [String],
+  labourerDetails: { 
+    age: Number, 
+    experience: Number, 
+    skills: [String], 
     isAvailable: { type: Boolean, default: true },
-    serviceRadius: { type: Number, default: 10 },
+    serviceRadius: { type: Number, default: 10 }
   },
   contractorDetails: { companyName: String, gstNumber: String, teamSize: String, crops: [String], isActive: { type: Boolean, default: true } },
   ratings: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
@@ -301,17 +255,19 @@ const adminSchema = new mongoose.Schema({
   role: { type: String, enum: ['admin', 'superadmin'], default: 'admin' },
   lastLogin: Date,
   isActive: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now }
 });
 
-adminSchema.pre('save', async function (next) {
+adminSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
-  this.password = crypto.createHash('sha256').update(this.password + JWT_SECRET).digest('hex');
+  const secret = process.env.JWT_SECRET || 'agriagent-secret-key';
+  this.password = crypto.createHash('sha256').update(this.password + secret).digest('hex');
   next();
 });
 
-adminSchema.methods.comparePassword = async function (password) {
-  const hash = crypto.createHash('sha256').update(password + JWT_SECRET).digest('hex');
+adminSchema.methods.comparePassword = async function(password) {
+  const secret = process.env.JWT_SECRET || 'agriagent-secret-key';
+  const hash = crypto.createHash('sha256').update(password + secret).digest('hex');
   return hash === this.password;
 };
 
@@ -335,7 +291,7 @@ const authenticate = async (req, res, next) => {
     const rawToken = authHeader.split(' ')[1];
 
     try {
-      const decoded = jwt.verify(rawToken, JWT_SECRET);
+      const decoded = jwt.verify(rawToken, process.env.JWT_SECRET || 'agriagent-secret-key');
       if (decoded.type === 'admin') {
         const adminUser = await Admin.findById(decoded.adminId);
         if (!adminUser?.isActive) return res.status(401).json({ error: 'Admin account disabled' });
@@ -343,26 +299,27 @@ const authenticate = async (req, res, next) => {
         req.user = { _id: 'admin', email: adminUser.email, role: 'admin', roles: ['admin'] };
         return next();
       }
-    } catch (jwtError) {
-      // not an admin token — fall through to other auth paths
+    } catch (jwtError) {}
+
+    if (!firebaseAdmin && process.env.NODE_ENV === 'development') {
+      req.user = { _id: 'demo123', email: 'demo@example.com', role: 'farmer', roles: ['farmer'] };
+      return next();
     }
 
     if (rawToken.startsWith('eyJ')) {
       try {
-        const decoded = jwt.verify(rawToken, JWT_SECRET);
+        const decoded = jwt.verify(rawToken, process.env.JWT_SECRET || 'agriagent-secret-key');
         const user = await User.findById(decoded.userId);
         if (!user) return res.status(401).json({ error: 'User not found' });
         if (!user.isActive) return res.status(401).json({ error: 'Account deactivated' });
         req.user = user;
         return next();
-      } catch (jwtError) {
-        return res.status(401).json({ error: 'Invalid JWT token' });
-      }
+      } catch (jwtError) { return res.status(401).json({ error: 'Invalid JWT token' }); }
     }
 
     if (rawToken.startsWith('google_')) {
       const accessToken = rawToken.slice(7);
-      const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`);
+      const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
       const tokenInfo = await tokenInfoRes.json();
       if (!tokenInfoRes.ok || tokenInfo.error) return res.status(401).json({ error: 'Invalid Google token' });
       const user = await User.findOne({ email: tokenInfo.email });
@@ -377,20 +334,15 @@ const authenticate = async (req, res, next) => {
     let user = await User.findOne({ firebaseUid: decodedToken.uid });
     if (!user) {
       user = await User.create({
-        firebaseUid: decodedToken.uid,
-        email: decodedToken.email,
+        firebaseUid: decodedToken.uid, email: decodedToken.email,
         profile: { name: decodedToken.name || decodedToken.email.split('@')[0], profileImage: decodedToken.picture },
-        roles: ['farmer'],
-        role: 'farmer',
+        roles: ['farmer'], role: 'farmer',
       });
     }
     if (!user.isActive) return res.status(401).json({ error: 'Account deactivated' });
     req.user = user;
     next();
-  } catch (error) {
-    console.error('Auth error:', error.message);
-    res.status(401).json({ error: 'Authentication failed' });
-  }
+  } catch (error) { console.error('Auth error:', error.message); res.status(401).json({ error: 'Authentication failed' }); }
 };
 
 const adminAuth = async (req, res, next) => {
@@ -398,26 +350,22 @@ const adminAuth = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'agriagent-secret-key');
     if (decoded.type !== 'admin') return res.status(403).json({ error: 'Admin access required' });
     const adminUser = await Admin.findById(decoded.adminId);
     if (!adminUser?.isActive) return res.status(401).json({ error: 'Admin account disabled' });
     req.admin = adminUser;
     next();
-  } catch (error) {
-    res.status(401).json({ error: 'Authentication failed' });
-  }
+  } catch (error) { res.status(401).json({ error: 'Authentication failed' }); }
 };
 
 // ==================== HELPER ====================
 const calculateDistance = (lat1, lng1, lat2, lng2) => {
   if (!lat1 || !lng1 || !lat2 || !lng2) return 999;
   const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
 };
 
@@ -467,29 +415,29 @@ app.post('/api/upload/images', authenticate, upload.array('files', 5), async (re
     if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files provided' });
     if (!gridfsBucket) return res.status(503).json({ error: 'Image service not ready' });
 
-    const urls = await Promise.all(
-      req.files.map(async (file) => {
-        const optimizedBuffer = await sharp(file.buffer)
-          .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 80 })
-          .toBuffer();
+    const urls = await Promise.all(req.files.map(async (file) => {
+      const optimizedBuffer = await sharp(file.buffer)
+        .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 80 })
+        .toBuffer();
 
-        const filename = `${Date.now()}_${crypto.randomBytes(8).toString('hex')}.webp`;
+      const filename = `${Date.now()}_${crypto.randomBytes(8).toString('hex')}.webp`;
 
-        return new Promise((resolve, reject) => {
-          const uploadStream = gridfsBucket.openUploadStream(filename, {
-            contentType: 'image/webp',
-            metadata: { uploadedBy: req.user._id.toString() },
-          });
-
-          const fileId = uploadStream.id;
-
-          uploadStream.on('finish', () => resolve(`${process.env.API_BASE_URL}/api/images/${fileId}`));
-          uploadStream.on('error', reject);
-          uploadStream.end(optimizedBuffer);
+      return new Promise((resolve, reject) => {
+        const uploadStream = gridfsBucket.openUploadStream(filename, {
+          contentType: 'image/webp',
+          metadata: { uploadedBy: req.user._id.toString() },
         });
-      })
-    );
+
+        const fileId = uploadStream.id;
+
+        uploadStream.on('finish', () =>
+          resolve(`${process.env.API_BASE_URL}/api/images/${fileId}`)
+        );
+        uploadStream.on('error', reject);
+        uploadStream.end(optimizedBuffer);
+      });
+    }));
 
     res.json({ success: true, urls });
   } catch (error) {
@@ -500,7 +448,6 @@ app.post('/api/upload/images', authenticate, upload.array('files', 5), async (re
 app.get('/api/images/:id', async (req, res) => {
   try {
     if (!gridfsBucket) return res.status(503).json({ error: 'Image service not ready' });
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ error: 'Invalid image ID' });
     const _id = new mongoose.Types.ObjectId(req.params.id);
     const files = await imageDb.collection('agriagent_images.files').findOne({ _id });
     if (!files) return res.status(404).json({ error: 'Image not found' });
@@ -517,22 +464,10 @@ app.get('/api/images/:id', async (req, res) => {
 app.delete('/api/images/:id', authenticate, async (req, res) => {
   try {
     if (!gridfsBucket) return res.status(503).json({ error: 'Image service not ready' });
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ error: 'Invalid image ID' });
     const _id = new mongoose.Types.ObjectId(req.params.id);
-
-    // Only allow the uploader or an admin to delete
-    const fileDoc = await imageDb.collection('agriagent_images.files').findOne({ _id });
-    if (!fileDoc) return res.status(404).json({ error: 'Image not found' });
-    const uploaderId = fileDoc.metadata?.uploadedBy;
-    if (uploaderId && uploaderId !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-
     await gridfsBucket.delete(_id);
     res.json({ success: true, message: 'Image deleted' });
-  } catch (error) {
-    res.status(500).json({ error: 'Delete failed' });
-  }
+  } catch (error) { res.status(500).json({ error: 'Delete failed' }); }
 });
 
 // ==================== HEALTH ====================
@@ -541,7 +476,7 @@ app.get('/health', async (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString(), mongodb: dbStatus, imageDb: gridfsBucket ? 'connected' : 'disconnected' });
 });
 
-app.get('/', (req, res) => res.json({ message: 'AgriAgent API', version: '2.0.0' }));
+app.get('/', (req, res) => res.json({ message: 'AgriAgent API', version: '2.0.0', imageStorage: 'MongoDB GridFS' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
 // ==================== WEATHER ====================
@@ -549,23 +484,21 @@ app.get('/api/weather', async (req, res) => {
   try {
     const { lat, lng } = req.query;
     if (!lat || !lng) return res.status(400).json({ error: 'Latitude and longitude required' });
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation,rain,cloud_cover&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,rain_sum,weather_code,wind_speed_10m_max,sunrise,sunset,uv_index_max&timezone=auto&forecast_days=6`;
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation,rain,cloud_cover&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,rain_sum,weather_code,wind_speed_10m_max,sunrise,sunset,uv_index_max&timezone=auto&forecast_days=6`;
     const response = await fetch(url);
     const data = await response.json();
     if (!data.current) return res.status(500).json({ error: 'Failed to fetch weather data' });
     const weatherCodes = {
-      0: { description: 'Clear Sky', icon: 'clear' }, 1: { description: 'Mainly Clear', icon: 'clear' }, 2: { description: 'Partly Cloudy', icon: 'partly-cloudy' }, 3: { description: 'Overcast', icon: 'cloudy' }, 45: { description: 'Foggy', icon: 'fog' }, 48: { description: 'Depositing Rime Fog', icon: 'fog' }, 51: { description: 'Light Drizzle', icon: 'drizzle' }, 53: { description: 'Moderate Drizzle', icon: 'drizzle' }, 55: { description: 'Dense Drizzle', icon: 'drizzle' }, 61: { description: 'Slight Rain', icon: 'rain' }, 63: { description: 'Moderate Rain', icon: 'rain' }, 65: { description: 'Heavy Rain', icon: 'heavy-rain' }, 71: { description: 'Slight Snow', icon: 'snow' }, 73: { description: 'Moderate Snow', icon: 'snow' }, 75: { description: 'Heavy Snow', icon: 'snow' }, 80: { description: 'Rain Showers', icon: 'rain' }, 81: { description: 'Moderate Rain Showers', icon: 'rain' }, 82: { description: 'Violent Rain Showers', icon: 'heavy-rain' }, 95: { description: 'Thunderstorm', icon: 'thunderstorm' }, 96: { description: 'Thunderstorm with Hail', icon: 'thunderstorm' }, 99: { description: 'Severe Thunderstorm', icon: 'thunderstorm' },
+      0: { description: 'Clear Sky', icon: 'clear' }, 1: { description: 'Mainly Clear', icon: 'clear' }, 2: { description: 'Partly Cloudy', icon: 'partly-cloudy' }, 3: { description: 'Overcast', icon: 'cloudy' }, 45: { description: 'Foggy', icon: 'fog' }, 48: { description: 'Depositing Rime Fog', icon: 'fog' }, 51: { description: 'Light Drizzle', icon: 'drizzle' }, 53: { description: 'Moderate Drizzle', icon: 'drizzle' }, 55: { description: 'Dense Drizzle', icon: 'drizzle' }, 61: { description: 'Slight Rain', icon: 'rain' }, 63: { description: 'Moderate Rain', icon: 'rain' }, 65: { description: 'Heavy Rain', icon: 'heavy-rain' }, 71: { description: 'Slight Snow', icon: 'snow' }, 73: { description: 'Moderate Snow', icon: 'snow' }, 75: { description: 'Heavy Snow', icon: 'snow' }, 80: { description: 'Rain Showers', icon: 'rain' }, 81: { description: 'Moderate Rain Showers', icon: 'rain' }, 82: { description: 'Violent Rain Showers', icon: 'heavy-rain' }, 95: { description: 'Thunderstorm', icon: 'thunderstorm' }, 96: { description: 'Thunderstorm with Hail', icon: 'thunderstorm' }, 99: { description: 'Severe Thunderstorm', icon: 'thunderstorm' }
     };
     const current = { temperature: Math.round(data.current.temperature_2m), feelsLike: Math.round(data.current.apparent_temperature), humidity: data.current.relative_humidity_2m, windSpeed: data.current.wind_speed_10m, windDirection: data.current.wind_direction_10m, precipitation: data.current.precipitation, rain: data.current.rain, cloudCover: data.current.cloud_cover, weatherCode: data.current.weather_code, weather: weatherCodes[data.current.weather_code] || { description: 'Unknown', icon: 'cloudy' } };
     const daily = data.daily.time.map((date, index) => ({ date, dayName: new Date(date).toLocaleDateString('en-US', { weekday: 'short' }), dateFormatted: new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), temperatureMax: Math.round(data.daily.temperature_2m_max[index]), temperatureMin: Math.round(data.daily.temperature_2m_min[index]), precipitation: data.daily.precipitation_sum[index], rainSum: data.daily.rain_sum[index], weatherCode: data.daily.weather_code[index], weather: weatherCodes[data.daily.weather_code[index]] || { description: 'Unknown', icon: 'cloudy' }, windSpeedMax: data.daily.wind_speed_10m_max[index], sunrise: data.daily.sunrise[index] ? data.daily.sunrise[index].split('T')[1]?.substring(0, 5) : null, sunset: data.daily.sunset[index] ? data.daily.sunset[index].split('T')[1]?.substring(0, 5) : null, uvIndex: data.daily.uv_index_max[index] }));
     res.json({ success: true, current, daily, location: { lat: parseFloat(lat), lng: parseFloat(lng) } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch weather data' });
-  }
+  } catch (error) { res.status(500).json({ error: 'Failed to fetch weather data' }); }
 });
 
 // ==================== ADMIN AUTH ROUTES ====================
-app.post('/api/admin/login', authLimiter, async (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -575,35 +508,24 @@ app.post('/api/admin/login', authLimiter, async (req, res) => {
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
     adminUser.lastLogin = new Date();
     await adminUser.save();
-    const token = jwt.sign({ adminId: adminUser._id, role: adminUser.role, type: 'admin' }, JWT_SECRET, { expiresIn: '12h' });
+    const token = jwt.sign({ adminId: adminUser._id, role: adminUser.role, type: 'admin' }, process.env.JWT_SECRET || 'agriagent-secret-key', { expiresIn: '12h' });
     res.json({ success: true, token, admin: { id: adminUser._id, username: adminUser.username, email: adminUser.email, role: adminUser.role } });
-  } catch (error) {
-    res.status(500).json({ error: 'Login failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/session', adminAuth, async (req, res) => {
   res.json({ success: true, admin: { id: req.admin._id, username: req.admin.username, email: req.admin.email, role: req.admin.role } });
 });
 
-// NOTE: This route creates a superadmin using ADMIN_SETUP_KEY. Disable it (remove
-// the route or set DISABLE_ADMIN_SETUP=true) immediately after initial setup.
-app.post('/api/admin/setup', authLimiter, async (req, res) => {
+app.post('/api/admin/setup', async (req, res) => {
   try {
-    if (process.env.DISABLE_ADMIN_SETUP === 'true') {
-      return res.status(403).json({ error: 'Admin setup is disabled' });
-    }
     const { setupKey, username, password, email } = req.body;
-    if (!setupKey || !crypto.timingSafeEqual(Buffer.from(setupKey), Buffer.from(process.env.ADMIN_SETUP_KEY))) {
-      return res.status(403).json({ error: 'Invalid setup key' });
-    }
+    if (setupKey !== process.env.ADMIN_SETUP_KEY) return res.status(403).json({ error: 'Invalid setup key' });
     const existingAdmin = await Admin.findOne({ $or: [{ username }, { email }] });
     if (existingAdmin) return res.status(400).json({ error: 'Admin already exists' });
     const adminUser = await Admin.create({ username, password, email, role: 'superadmin' });
     res.json({ success: true, message: 'Admin created successfully', admin: { id: adminUser._id, username: adminUser.username, email: adminUser.email, role: adminUser.role } });
-  } catch (error) {
-    res.status(500).json({ error: 'Setup failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/change-password', adminAuth, async (req, res) => {
@@ -615,21 +537,17 @@ app.put('/api/admin/change-password', adminAuth, async (req, res) => {
     req.admin.password = newPassword;
     await req.admin.save();
     res.json({ success: true, message: 'Password changed successfully' });
-  } catch (error) {
-    res.status(500).json({ error: 'Password change failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==================== ADMIN MANAGEMENT ROUTES ====================
 app.get('/api/admin/stats', adminAuth, async (req, res) => {
   try {
     const [totalUsers, activeLabourers, totalEquipment, totalProduce, pendingPayments, totalAds, activeAds, totalBookings, pendingReports] = await Promise.all([
-      User.countDocuments({ isActive: true }), User.countDocuments({ isActive: true, roles: 'labourer', 'labourerDetails.isAvailable': true }), Equipment.countDocuments({ isActive: true }), Produce.countDocuments({ isActive: true, isAvailable: true }), Payment.countDocuments({ status: 'pending_verification' }), Ad.countDocuments(), Ad.countDocuments({ status: 'active' }), Booking.countDocuments({ status: 'pending' }), Report.countDocuments({ status: 'pending' }),
+      User.countDocuments({ isActive: true }), User.countDocuments({ isActive: true, roles: 'labourer', 'labourerDetails.isAvailable': true }), Equipment.countDocuments({ isActive: true }), Produce.countDocuments({ isActive: true, isAvailable: true }), Payment.countDocuments({ status: 'pending_verification' }), Ad.countDocuments(), Ad.countDocuments({ status: 'active' }), Booking.countDocuments({ status: 'pending' }), Report.countDocuments({ status: 'pending' })
     ]);
     res.json({ success: true, stats: { totalUsers, activeLabourers, totalEquipment, totalProduce, pendingPayments, totalAds, activeAds, totalBookings, pendingReports } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load stats' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/users', adminAuth, async (req, res) => {
@@ -641,9 +559,7 @@ app.get('/api/admin/users', adminAuth, async (req, res) => {
     const total = await User.countDocuments(query);
     const users = await User.find(query).select('-__v').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, users, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit), limit: parseInt(limit) } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load users' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/users/:id', adminAuth, async (req, res) => {
@@ -652,35 +568,25 @@ app.get('/api/admin/users/:id', adminAuth, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     const [equipment, produce, bookings] = await Promise.all([Equipment.find({ ownerId: user._id }), Produce.find({ farmerId: user._id }), Booking.find({ $or: [{ renterId: user._id }, { ownerId: user._id }] })]);
     res.json({ success: true, user, details: { equipmentCount: equipment.length, produceCount: produce.length, bookingCount: bookings.length } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load user' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/users/:id/toggle', adminAuth, async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    user.isActive = !user.isActive;
-    user.updatedAt = new Date();
-    await user.save();
+    user.isActive = !user.isActive; user.updatedAt = new Date(); await user.save();
     res.json({ success: true, isActive: user.isActive });
-  } catch (error) {
-    res.status(500).json({ error: 'Update failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/users/:id/verify', adminAuth, async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    user.verification.isVerified = true;
-    user.verification.verifiedAt = new Date();
-    await user.save();
+    user.verification.isVerified = true; user.verification.verifiedAt = new Date(); await user.save();
     res.json({ success: true, user });
-  } catch (error) {
-    res.status(500).json({ error: 'Verification failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/ads', adminAuth, async (req, res) => {
@@ -692,9 +598,7 @@ app.get('/api/admin/ads', adminAuth, async (req, res) => {
     const total = await Ad.countDocuments(query);
     const ads = await Ad.find(query).populate('advertiserId', 'profile.name profile.phone email').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, ads, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit) } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load ads' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/ads/:id/status', adminAuth, async (req, res) => {
@@ -704,9 +608,7 @@ app.put('/api/admin/ads/:id/status', adminAuth, async (req, res) => {
     const ad = await Ad.findByIdAndUpdate(req.params.id, { status, updatedAt: new Date() }, { new: true }).populate('advertiserId', 'profile.name email');
     if (!ad) return res.status(404).json({ error: 'Ad not found' });
     res.json({ success: true, ad });
-  } catch (error) {
-    res.status(500).json({ error: 'Update failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/payments', adminAuth, async (req, res) => {
@@ -717,9 +619,7 @@ app.get('/api/admin/payments', adminAuth, async (req, res) => {
     const total = await Payment.countDocuments(query);
     const payments = await Payment.find(query).populate('userId', 'profile.name email profile.phone').populate('adId', 'title type budget').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, payments, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit) } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load payments' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/payments/:id/verify', adminAuth, async (req, res) => {
@@ -728,9 +628,7 @@ app.put('/api/admin/payments/:id/verify', adminAuth, async (req, res) => {
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
     if (payment.adId) await Ad.findByIdAndUpdate(payment.adId, { status: 'active', paymentStatus: 'completed', updatedAt: new Date() });
     res.json({ success: true, payment });
-  } catch (error) {
-    res.status(500).json({ error: 'Verification failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/payments/:id/reject', adminAuth, async (req, res) => {
@@ -739,9 +637,7 @@ app.put('/api/admin/payments/:id/reject', adminAuth, async (req, res) => {
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
     if (payment.adId) await Ad.findByIdAndUpdate(payment.adId, { paymentStatus: 'failed', updatedAt: new Date() });
     res.json({ success: true, payment });
-  } catch (error) {
-    res.status(500).json({ error: 'Rejection failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/reports', adminAuth, async (req, res) => {
@@ -753,9 +649,7 @@ app.get('/api/admin/reports', adminAuth, async (req, res) => {
     const total = await Report.countDocuments(query);
     const reports = await Report.find(query).populate('reporterId', 'profile.name email').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, reports, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit) } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load reports' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
@@ -765,9 +659,7 @@ app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
     const report = await Report.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate('reporterId', 'profile.name email');
     if (!report) return res.status(404).json({ error: 'Report not found' });
     res.json({ success: true, report });
-  } catch (error) {
-    res.status(500).json({ error: 'Update failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/equipment', adminAuth, async (req, res) => {
@@ -779,9 +671,7 @@ app.get('/api/admin/equipment', adminAuth, async (req, res) => {
     const total = await Equipment.countDocuments(query);
     const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.phone email').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, equipment, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit) } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load equipment' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/equipment/:id/verify', adminAuth, async (req, res) => {
@@ -789,9 +679,7 @@ app.put('/api/admin/equipment/:id/verify', adminAuth, async (req, res) => {
     const equipment = await Equipment.findByIdAndUpdate(req.params.id, { isVerified: true }, { new: true });
     if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
     res.json({ success: true, equipment });
-  } catch (error) {
-    res.status(500).json({ error: 'Verification failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/admin/shops', adminAuth, async (req, res) => {
@@ -802,9 +690,7 @@ app.get('/api/admin/shops', adminAuth, async (req, res) => {
     const total = await FertilizerShop.countDocuments(query);
     const shops = await FertilizerShop.find(query).populate('addedBy', 'profile.name email').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, shops, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit) } });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load shops' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/admin/shops/:id/verify', adminAuth, async (req, res) => {
@@ -812,13 +698,11 @@ app.put('/api/admin/shops/:id/verify', adminAuth, async (req, res) => {
     const shop = await FertilizerShop.findByIdAndUpdate(req.params.id, { isVerified: true, updatedAt: new Date() }, { new: true });
     if (!shop) return res.status(404).json({ error: 'Shop not found' });
     res.json({ success: true, shop });
-  } catch (error) {
-    res.status(500).json({ error: 'Verification failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==================== AUTH ROUTES ====================
-app.get('/api/auth/google-mobile/callback', authLimiter, async (req, res) => {
+app.get('/api/auth/google-mobile/callback', async (req, res) => {
   try {
     const { code, state: codeVerifier, error: googleError } = req.query;
     if (googleError) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
@@ -831,31 +715,24 @@ app.get('/api/auth/google-mobile/callback', authLimiter, async (req, res) => {
     if (!googleUser.email || !googleUser.sub) return res.redirect(302, `agriagent://auth?error=Failed to fetch user info`);
     let user = await User.findOne({ $or: [{ email: googleUser.email }, { googleId: googleUser.sub }] });
     if (!user) user = await User.create({ googleId: googleUser.sub, email: googleUser.email, profile: { name: googleUser.name, profileImage: googleUser.picture }, roles: ['farmer'], role: 'farmer' });
-    else if (!user.googleId) {
-      user.googleId = googleUser.sub;
-      await user.save();
-    }
-    const appToken = jwt.sign({ userId: user._id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
+    else if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
+    const appToken = jwt.sign({ userId: user._id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'agriagent-secret-key', { expiresIn: '30d' });
     const params = new URLSearchParams({ token: appToken, userId: user._id.toString(), email: user.email, role: user.role });
     return res.redirect(302, `agriagent://auth?${params.toString()}`);
-  } catch (error) {
-    return res.redirect(302, `agriagent://auth?error=${encodeURIComponent('Authentication failed')}`);
-  }
+  } catch (error) { return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(error.message)}`); }
 });
 
-app.post('/api/auth/google', authLimiter, async (req, res) => {
+app.post('/api/auth/google', async (req, res) => {
   try {
     const { email, name, picture, googleId } = req.body;
     if (!googleId) return res.status(400).json({ error: 'Invalid Google ID' });
     let user = await User.findOne({ $or: [{ email }, { googleId }] });
     if (!user) user = await User.create({ googleId, email, profile: { name, profileImage: picture }, roles: ['farmer'], role: 'farmer' });
     res.json({ success: true, user: { id: user._id, email: user.email, role: user.role, roles: user.roles } });
-  } catch (error) {
-    res.status(500).json({ error: 'Authentication failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.post('/api/auth/google-mobile', authLimiter, async (req, res) => {
+app.post('/api/auth/google-mobile', async (req, res) => {
   try {
     const { code, codeVerifier, redirectUri } = req.body;
     googleOAuthClient.redirectUri = redirectUri;
@@ -864,14 +741,9 @@ app.post('/api/auth/google-mobile', authLimiter, async (req, res) => {
     const googleUser = await userInfoRes.json();
     let user = await User.findOne({ email: googleUser.email });
     if (!user) user = await User.create({ googleId: googleUser.sub, email: googleUser.email, profile: { name: googleUser.name, profileImage: googleUser.picture }, roles: ['farmer'], role: 'farmer' });
-    else if (!user.googleId) {
-      user.googleId = googleUser.sub;
-      await user.save();
-    }
+    else if (!user.googleId) { user.googleId = googleUser.sub; await user.save(); }
     res.json({ success: true, idToken: tokens.access_token, user: { id: user._id, email: user.email, role: user.role } });
-  } catch (error) {
-    res.status(500).json({ error: 'Authentication failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/auth/session', authenticate, async (req, res) => res.json({ success: true, user: req.user }));
@@ -886,39 +758,28 @@ app.put('/api/auth/role', authenticate, async (req, res) => {
     req.user.role = role;
     await req.user.save();
     res.json({ success: true, roles: req.user.roles, role: req.user.role });
-  } catch (error) {
-    res.status(500).json({ error: 'Update failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/auth/profile', authenticate, async (req, res) => {
-  try {
-    const { name, teluguName, phone, location, labourerDetails, contractorDetails } = req.body;
-    if (name) req.user.profile.name = name;
-    if (teluguName) req.user.profile.teluguName = teluguName;
-    if (phone) req.user.profile.phone = phone;
-    if (location) req.user.profile.location = location;
-    if (labourerDetails) req.user.labourerDetails = labourerDetails;
-    if (contractorDetails) req.user.contractorDetails = contractorDetails;
-    req.user.updatedAt = Date.now();
-    await req.user.save();
-    res.json({ success: true, user: req.user });
-  } catch (error) {
-    res.status(500).json({ error: 'Update failed' });
-  }
+  const { name, teluguName, phone, location, labourerDetails, contractorDetails } = req.body;
+  if (name) req.user.profile.name = name;
+  if (teluguName) req.user.profile.teluguName = teluguName;
+  if (phone) req.user.profile.phone = phone;
+  if (location) req.user.profile.location = location;
+  if (labourerDetails) req.user.labourerDetails = labourerDetails;
+  if (contractorDetails) req.user.contractorDetails = contractorDetails;
+  req.user.updatedAt = Date.now();
+  await req.user.save();
+  res.json({ success: true, user: req.user });
 });
 
 app.post('/api/auth/verify-age', authenticate, async (req, res) => {
-  try {
-    const { age } = req.body;
-    if (age < 18) return res.status(400).json({ error: 'Must be 18+' });
-    req.user.ageVerified = true;
-    req.user.age = age;
-    await req.user.save();
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Verification failed' });
-  }
+  const { age } = req.body;
+  if (age < 18) return res.status(400).json({ error: 'Must be 18+' });
+  req.user.ageVerified = true; req.user.age = age;
+  await req.user.save();
+  res.json({ success: true });
 });
 
 // ==================== USER MANAGEMENT ====================
@@ -953,8 +814,7 @@ app.put('/api/equipment/:id', authenticate, async (req, res) => {
   const equipment = await Equipment.findById(req.params.id);
   if (!equipment) return res.status(404).json({ error: 'Not found' });
   if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  Object.assign(equipment, req.body);
-  await equipment.save();
+  Object.assign(equipment, req.body); await equipment.save();
   res.json({ success: true, equipment });
 });
 
@@ -993,8 +853,7 @@ app.put('/api/produce/:id', authenticate, async (req, res) => {
   const produce = await Produce.findById(req.params.id);
   if (!produce) return res.status(404).json({ error: 'Not found' });
   if (produce.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  Object.assign(produce, req.body);
-  await produce.save();
+  Object.assign(produce, req.body); await produce.save();
   res.json({ success: true, produce });
 });
 
@@ -1022,8 +881,7 @@ app.put('/api/bookings/:id', authenticate, async (req, res) => {
   const booking = await Booking.findById(req.params.id);
   if (!booking) return res.status(404).json({ error: 'Not found' });
   if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  booking.status = req.body.status;
-  await booking.save();
+  booking.status = req.body.status; await booking.save();
   res.json({ success: true, booking });
 });
 
@@ -1036,9 +894,7 @@ app.get('/api/problems', async (req, res) => {
     if (search) query.$or = [{ title: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
     const problems = await Problem.find(query).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes').limit(50);
     res.json({ success: true, problems });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load problems' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/problems/:id', async (req, res) => {
@@ -1047,18 +903,14 @@ app.get('/api/problems/:id', async (req, res) => {
     if (!problem) return res.status(404).json({ error: 'Not found' });
     const solutions = await Solution.find({ problemId: problem._id, isActive: true }).populate('farmerId', 'profile.name profile.profileImage verification.isVerified').sort('-upvotes');
     res.json({ success: true, problem, solutions });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to load problem' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/problems', authenticate, async (req, res) => {
   try {
     const problem = await Problem.create({ ...req.body, farmerId: req.user._id });
     res.status(201).json({ success: true, problem });
-  } catch (error) {
-    res.status(500).json({ error: 'Creation failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/problems/:id', authenticate, async (req, res) => {
@@ -1066,12 +918,9 @@ app.put('/api/problems/:id', authenticate, async (req, res) => {
     const problem = await Problem.findById(req.params.id);
     if (!problem) return res.status(404).json({ error: 'Problem not found' });
     if (problem.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    Object.assign(problem, req.body);
-    await problem.save();
+    Object.assign(problem, req.body); await problem.save();
     res.json({ success: true, problem });
-  } catch (error) {
-    res.status(500).json({ error: 'Update failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.delete('/api/problems/:id', authenticate, async (req, res) => {
@@ -1079,12 +928,9 @@ app.delete('/api/problems/:id', authenticate, async (req, res) => {
     const problem = await Problem.findById(req.params.id);
     if (!problem) return res.status(404).json({ error: 'Problem not found' });
     if (problem.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    problem.isActive = false;
-    await problem.save();
+    problem.isActive = false; await problem.save();
     res.json({ success: true, message: 'Problem deleted' });
-  } catch (error) {
-    res.status(500).json({ error: 'Delete failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
@@ -1092,18 +938,11 @@ app.post('/api/problems/:id/upvote', authenticate, async (req, res) => {
     const problem = await Problem.findById(req.params.id);
     if (!problem) return res.status(404).json({ error: 'Not found' });
     const hasUpvoted = problem.upvotedBy.includes(req.user._id);
-    if (hasUpvoted) {
-      problem.upvotes -= 1;
-      problem.upvotedBy.pull(req.user._id);
-    } else {
-      problem.upvotes += 1;
-      problem.upvotedBy.push(req.user._id);
-    }
+    if (hasUpvoted) { problem.upvotes -= 1; problem.upvotedBy.pull(req.user._id); }
+    else { problem.upvotes += 1; problem.upvotedBy.push(req.user._id); }
     await problem.save();
     res.json({ success: true, upvotes: problem.upvotes });
-  } catch (error) {
-    res.status(500).json({ error: 'Upvote failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/problems/:id/solutions', authenticate, async (req, res) => {
@@ -1111,9 +950,7 @@ app.post('/api/problems/:id/solutions', authenticate, async (req, res) => {
     const solution = await Solution.create({ problemId: req.params.id, farmerId: req.user._id, ...req.body });
     await Problem.findByIdAndUpdate(req.params.id, { $inc: { solutionCount: 1 } });
     res.status(201).json({ success: true, solution });
-  } catch (error) {
-    res.status(500).json({ error: 'Creation failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/solutions/:id', authenticate, async (req, res) => {
@@ -1121,12 +958,9 @@ app.put('/api/solutions/:id', authenticate, async (req, res) => {
     const solution = await Solution.findById(req.params.id);
     if (!solution) return res.status(404).json({ error: 'Solution not found' });
     if (solution.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    Object.assign(solution, req.body);
-    await solution.save();
+    Object.assign(solution, req.body); await solution.save();
     res.json({ success: true, solution });
-  } catch (error) {
-    res.status(500).json({ error: 'Update failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.delete('/api/solutions/:id', authenticate, async (req, res) => {
@@ -1134,13 +968,10 @@ app.delete('/api/solutions/:id', authenticate, async (req, res) => {
     const solution = await Solution.findById(req.params.id);
     if (!solution) return res.status(404).json({ error: 'Solution not found' });
     if (solution.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-    solution.isActive = false;
-    await solution.save();
+    solution.isActive = false; await solution.save();
     await Problem.findByIdAndUpdate(solution.problemId, { $inc: { solutionCount: -1 } });
     res.json({ success: true, message: 'Solution deleted' });
-  } catch (error) {
-    res.status(500).json({ error: 'Delete failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
@@ -1148,79 +979,82 @@ app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
     const solution = await Solution.findById(req.params.id);
     if (!solution) return res.status(404).json({ error: 'Not found' });
     const hasUpvoted = solution.upvotedBy.includes(req.user._id);
-    if (hasUpvoted) {
-      solution.upvotes -= 1;
-      solution.upvotedBy.pull(req.user._id);
-    } else {
-      solution.upvotes += 1;
-      solution.upvotedBy.push(req.user._id);
-    }
+    if (hasUpvoted) { solution.upvotes -= 1; solution.upvotedBy.pull(req.user._id); }
+    else { solution.upvotes += 1; solution.upvotedBy.push(req.user._id); }
     await solution.save();
     res.json({ success: true, upvotes: solution.upvotes });
-  } catch (error) {
-    res.status(500).json({ error: 'Upvote failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== LABOURERS ====================
+// ==================== LABOURERS (UPDATED) ====================
 app.get('/api/labourers/nearby', async (req, res) => {
   const { lat, lng, radius = 10, crop, village } = req.query;
   const query = { roles: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
-
+  
   if (crop && crop !== 'all' && crop !== 'All crops') query['labourerDetails.skills'] = crop;
-
+  
   if (village) {
     query.$or = [
       { 'profile.location.village': { $regex: village, $options: 'i' } },
       { 'profile.location.address': { $regex: village, $options: 'i' } },
-      { 'profile.location.district': { $regex: village, $options: 'i' } },
+      { 'profile.location.district': { $regex: village, $options: 'i' } }
     ];
   }
-
-  let labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(100);
-
+  
+  let labourers = await User.find(query)
+    .select('profile labourerDetails ratings verification email')
+    .sort('-ratings.average')
+    .limit(100);
+  
   if (lat && lng) {
-    labourers = labourers
-      .map((l) => {
-        const labourerLat = l.profile.location?.lat;
-        const labourerLng = l.profile.location?.lng;
-        const distance = calculateDistance(parseFloat(lat), parseFloat(lng), labourerLat, labourerLng);
-
-        const serviceRadius = l.labourerDetails?.serviceRadius || 10;
-        const searchRadius = Number(radius);
-        const effectiveRadius = Math.min(serviceRadius, searchRadius);
-
-        return {
-          ...l.toObject(),
-          distance,
-          serviceRadius,
-          withinRange: distance <= effectiveRadius,
-        };
-      })
-      .filter((l) => l.withinRange)
-      .sort((a, b) => a.distance - b.distance);
+    labourers = labourers.map(l => {
+      const labourerLat = l.profile.location?.lat;
+      const labourerLng = l.profile.location?.lng;
+      const distance = calculateDistance(
+        parseFloat(lat), 
+        parseFloat(lng), 
+        labourerLat, 
+        labourerLng
+      );
+      
+      const serviceRadius = l.labourerDetails?.serviceRadius || 10;
+      const searchRadius = Number(radius);
+      const effectiveRadius = Math.min(serviceRadius, searchRadius);
+      
+      return { 
+        ...l.toObject(), 
+        distance,
+        serviceRadius,
+        withinRange: distance <= effectiveRadius
+      };
+    })
+    .filter(l => l.withinRange)
+    .sort((a, b) => a.distance - b.distance);
   }
-
+  
   res.json({ success: true, labourers });
 });
 
 app.get('/api/labourers', async (req, res) => {
   const { crop, isAvailable, village } = req.query;
   const query = { roles: 'labourer', isActive: true };
-
+  
   if (crop && crop !== 'all' && crop !== 'All crops') query['labourerDetails.skills'] = crop;
   if (isAvailable !== undefined) query['labourerDetails.isAvailable'] = isAvailable === 'true';
-
+  
   if (village) {
     query.$or = [
       { 'profile.location.village': { $regex: village, $options: 'i' } },
       { 'profile.location.address': { $regex: village, $options: 'i' } },
-      { 'profile.location.district': { $regex: village, $options: 'i' } },
+      { 'profile.location.district': { $regex: village, $options: 'i' } }
     ];
   }
-
-  const labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(100);
-
+  
+  const labourers = await User.find(query)
+    .select('profile labourerDetails ratings verification email')
+    .sort('-ratings.average')
+    .limit(100);
+  
   res.json({ success: true, labourers });
 });
 
@@ -1261,10 +1095,8 @@ app.get('/api/fertilizer-shops/nearby', async (req, res) => {
   if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { 'location.village': { $regex: search, $options: 'i' } }];
   let shops = await FertilizerShop.find(query).sort('-isVerified').limit(100);
   if (lat && lng) {
-    shops = shops
-      .map((s) => ({ ...s.toObject(), distance: calculateDistance(parseFloat(lat), parseFloat(lng), s.location.lat, s.location.lng) }))
-      .filter((s) => s.distance <= parseFloat(radius))
-      .sort((a, b) => a.distance - b.distance);
+    shops = shops.map(s => ({ ...s.toObject(), distance: calculateDistance(parseFloat(lat), parseFloat(lng), s.location.lat, s.location.lng) }))
+      .filter(s => s.distance <= parseFloat(radius)).sort((a, b) => a.distance - b.distance);
   }
   res.json({ success: true, shops });
 });
@@ -1293,9 +1125,7 @@ app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   const shop = await FertilizerShop.findById(req.params.id);
   if (!shop) return res.status(404).json({ error: 'Not found' });
   if (shop.addedBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  Object.assign(shop, req.body);
-  shop.updatedAt = Date.now();
-  await shop.save();
+  Object.assign(shop, req.body); shop.updatedAt = Date.now(); await shop.save();
   res.json({ success: true, shop });
 });
 
@@ -1305,8 +1135,7 @@ app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
   const shop = await FertilizerShop.findById(req.params.id);
   if (!shop) return res.status(404).json({ error: 'Not found' });
   shop.rating = Math.round(((shop.rating * shop.totalRatings + rating) / (shop.totalRatings + 1)) * 10) / 10;
-  shop.totalRatings += 1;
-  await shop.save();
+  shop.totalRatings += 1; await shop.save();
   res.json({ success: true, rating: shop.rating });
 });
 
@@ -1321,7 +1150,7 @@ app.get('/api/ads/active', async (req, res) => {
   const query = { status: 'active', isActive: true, startDate: { $lte: new Date() }, endDate: { $gte: new Date() } };
   if (placement && placement !== 'all') query.placement = { $in: [placement, 'all'] };
   const ads = await Ad.find(query).sort('-createdAt').limit(parseInt(limit));
-  await Ad.updateMany({ _id: { $in: ads.map((ad) => ad._id) } }, { $inc: { impressions: 1 } });
+  await Ad.updateMany({ _id: { $in: ads.map(ad => ad._id) } }, { $inc: { impressions: 1 } });
   res.json({ success: true, ads });
 });
 
@@ -1335,9 +1164,7 @@ app.put('/api/ads/:id/status', authenticate, async (req, res) => {
   const ad = await Ad.findById(req.params.id);
   if (!ad) return res.status(404).json({ error: 'Not found' });
   if (ad.advertiserId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  ad.status = req.body.status;
-  ad.updatedAt = Date.now();
-  await ad.save();
+  ad.status = req.body.status; ad.updatedAt = Date.now(); await ad.save();
   res.json({ success: true, ad });
 });
 
@@ -1348,10 +1175,7 @@ app.post('/api/ads/:id/click', async (req, res) => {
 
 // ==================== PAYMENTS ====================
 app.get('/api/payments/upi-details', async (req, res) => {
-  if (!process.env.MERCHANT_UPI_ID) {
-    return res.status(503).json({ error: 'Payment configuration not available' });
-  }
-  res.json({ success: true, upiId: process.env.MERCHANT_UPI_ID, merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies', qrCodeUrl: process.env.QR_CODE_URL || '' });
+  res.json({ success: true, upiId: process.env.MERCHANT_UPI_ID || 'siddhikreddy@ibl', merchantName: process.env.MERCHANT_NAME || 'AgriAgent Technologies', qrCodeUrl: process.env.QR_CODE_URL || '' });
 });
 
 app.post('/api/payments/upi', authenticate, async (req, res) => {
@@ -1371,10 +1195,7 @@ app.post('/api/payments/confirm-payment', authenticate, async (req, res) => {
     await Ad.findByIdAndUpdate(adId, { paymentStatus: 'pending_verification' });
     return res.json({ success: true, paymentId: newPayment._id });
   }
-  payment.utrNumber = utrNumber;
-  payment.status = 'pending_verification';
-  payment.userConfirmed = true;
-  payment.userConfirmedAt = new Date();
+  payment.utrNumber = utrNumber; payment.status = 'pending_verification'; payment.userConfirmed = true; payment.userConfirmedAt = new Date();
   await payment.save();
   await Ad.findByIdAndUpdate(adId, { paymentStatus: 'pending_verification' });
   res.json({ success: true, message: 'Payment submitted for verification' });
@@ -1385,77 +1206,34 @@ app.post('/api/reports', authenticate, async (req, res) => {
   try {
     const report = await Report.create({ ...req.body, reporterId: req.user._id });
     res.status(201).json({ success: true, report });
-  } catch (error) {
-    res.status(500).json({ error: 'Creation failed' });
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== DEBUG (admin-only, opt-in, non-production) ====================
-// These routes previously had NO auth check and leaked user PII (names, phone
-// numbers, precise locations) and payment data (UTR numbers, amounts) to anyone
-// who found the URL. They are now: disabled by default, only enabled outside
-// production via ENABLE_DEBUG_ROUTES=true, and always gated behind adminAuth.
-if (DEBUG_ROUTES_ENABLED) {
-  app.get('/api/debug/labourers', adminAuth, async (req, res) => {
-    try {
-      const count = await User.countDocuments({ roles: 'labourer', isActive: true });
-      const labourers = await User.find({ roles: 'labourer', isActive: true }).select('profile.name profile.phone profile.location labourerDetails roles').limit(20);
-      res.json({
-        success: true,
-        totalLabourers: count,
-        labourers: labourers.map((l) => ({
-          id: l._id,
-          name: l.profile?.name,
-          phone: l.profile?.phone,
-          hasLocation: !!(l.profile?.location?.lat && l.profile?.location?.lng),
-          lat: l.profile?.location?.lat,
-          lng: l.profile?.location?.lng,
-          skills: l.labourerDetails?.skills || [],
-          isAvailable: l.labourerDetails?.isAvailable,
-          serviceRadius: l.labourerDetails?.serviceRadius || 10,
-          roles: l.roles,
-        })),
-      });
-    } catch (error) {
-      res.status(500).json({ error: 'Debug query failed' });
-    }
-  });
+// ==================== DEBUG ====================
+app.get('/api/debug/labourers', async (req, res) => {
+  try {
+    const count = await User.countDocuments({ roles: 'labourer', isActive: true });
+    const labourers = await User.find({ roles: 'labourer', isActive: true }).select('profile.name profile.phone profile.location labourerDetails roles').limit(20);
+    res.json({ success: true, totalLabourers: count, labourers: labourers.map(l => ({ id: l._id, name: l.profile?.name, phone: l.profile?.phone, hasLocation: !!(l.profile?.location?.lat && l.profile?.location?.lng), lat: l.profile?.location?.lat, lng: l.profile?.location?.lng, skills: l.labourerDetails?.skills || [], isAvailable: l.labourerDetails?.isAvailable, serviceRadius: l.labourerDetails?.serviceRadius || 10, roles: l.roles })) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 
-  app.get('/api/debug/contractors', adminAuth, async (req, res) => {
-    try {
-      const count = await User.countDocuments({ roles: 'contractor', isActive: true });
-      const contractors = await User.find({ roles: 'contractor', isActive: true }).select('profile.name profile.phone profile.location contractorDetails roles').limit(20);
-      res.json({
-        success: true,
-        totalContractors: count,
-        contractors: contractors.map((c) => ({
-          id: c._id,
-          name: c.profile?.name,
-          companyName: c.contractorDetails?.companyName,
-          phone: c.profile?.phone,
-          hasLocation: !!(c.profile?.location?.lat && c.profile?.location?.lng),
-          crops: c.contractorDetails?.crops || [],
-          teamSize: c.contractorDetails?.teamSize,
-          roles: c.roles,
-        })),
-      });
-    } catch (error) {
-      res.status(500).json({ error: 'Debug query failed' });
-    }
-  });
+app.get('/api/debug/contractors', async (req, res) => {
+  try {
+    const count = await User.countDocuments({ roles: 'contractor', isActive: true });
+    const contractors = await User.find({ roles: 'contractor', isActive: true }).select('profile.name profile.phone profile.location contractorDetails roles').limit(20);
+    res.json({ success: true, totalContractors: count, contractors: contractors.map(c => ({ id: c._id, name: c.profile?.name, companyName: c.contractorDetails?.companyName, phone: c.profile?.phone, hasLocation: !!(c.profile?.location?.lat && c.profile?.location?.lng), crops: c.contractorDetails?.crops || [], teamSize: c.contractorDetails?.teamSize, roles: c.roles })) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 
-  app.get('/api/debug/payments', adminAuth, async (req, res) => {
-    const payments = await Payment.find().sort('-createdAt').limit(20);
-    res.json({ total: payments.length, payments: payments.map((p) => ({ id: p._id, adId: p.adId, userId: p.userId, amount: p.amount, utrNumber: p.utrNumber, userConfirmed: p.userConfirmed, status: p.status })) });
-  });
-}
+app.get('/api/debug/payments', async (req, res) => {
+  const payments = await Payment.find().sort('-createdAt').limit(20);
+  res.json({ total: payments.length, payments: payments.map(p => ({ id: p._id, adId: p.adId, userId: p.userId, amount: p.amount, utrNumber: p.utrNumber, userConfirmed: p.userConfirmed, status: p.status })) });
+});
 
 // ==================== ERROR HANDLERS ====================
 app.use((req, res) => res.status(404).json({ error: `Route ${req.method} ${req.url} not found` }));
-app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  res.status(500).json({ error: 'Internal server error' });
-});
+app.use((err, req, res, next) => { console.error('Server error:', err); res.status(500).json({ error: 'Internal server error' }); });
 
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 5000;
@@ -1465,6 +1243,7 @@ const startServer = async () => {
   await connectImageDB();
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`AgriAgent Server running on port ${PORT}`);
+    console.log(`Image Storage: MongoDB GridFS (movie db)`);
     console.log(`Health: http://localhost:${PORT}/health`);
   });
 };
