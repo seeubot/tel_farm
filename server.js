@@ -707,7 +707,16 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     const { code, state: codeVerifier, error: googleError } = req.query;
     if (googleError) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
     if (!code || !codeVerifier) return res.redirect(302, `agriagent://auth?error=Missing parameters`);
-    const redirectUri = `${process.env.API_BASE_URL}/api/auth/google-mobile/callback`;
+
+    // FIX: This MUST exactly match the redirect_uri used in the initial
+    // authorization request (the one registered in Google Cloud Console),
+    // NOT process.env.API_BASE_URL. Deriving it from an env var caused a
+    // mismatch: the app's authorization request used the Vercel proxy URL,
+    // while this line was building the Koyeb URL instead — two different
+    // strings, which Google's token endpoint rejects as redirect_uri_mismatch.
+    const redirectUri = `https://agriagentt.vercel.app/api/auth/google-mobile/callback`;
+    console.log('[OAuth] Token exchange redirect_uri:', redirectUri);
+
     const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier, redirect_uri: redirectUri });
     if (!tokens.access_token) return res.redirect(302, `agriagent://auth?error=Failed to obtain token`);
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
