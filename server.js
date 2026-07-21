@@ -708,12 +708,7 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     if (googleError) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
     if (!code || !codeVerifier) return res.redirect(302, `agriagent://auth?error=Missing parameters`);
 
-    // FIX: This MUST exactly match the redirect_uri used in the initial
-    // authorization request (the one registered in Google Cloud Console),
-    // NOT process.env.API_BASE_URL. Deriving it from an env var caused a
-    // mismatch: the app's authorization request used the Vercel proxy URL,
-    // while this line was building the Koyeb URL instead — two different
-    // strings, which Google's token endpoint rejects as redirect_uri_mismatch.
+    // Fixed redirect_uri to match exactly what's registered in Google Cloud Console
     const redirectUri = `https://agriagentt.vercel.app/api/auth/google-mobile/callback`;
     console.log('[OAuth] Token exchange redirect_uri:', redirectUri);
 
@@ -1111,10 +1106,11 @@ app.get('/api/fertilizer-shops/nearby', async (req, res) => {
 });
 
 app.get('/api/fertilizer-shops', async (req, res) => {
-  const { search, district } = req.query;
+  const { search, district, addedBy } = req.query;
   const query = { isActive: true };
   if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }];
   if (district) query['location.district'] = { $regex: district, $options: 'i' };
+  if (addedBy) query.addedBy = addedBy;
   const shops = await FertilizerShop.find(query).sort('-rating').limit(100);
   res.json({ success: true, shops });
 });
@@ -1136,6 +1132,24 @@ app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   if (shop.addedBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
   Object.assign(shop, req.body); shop.updatedAt = Date.now(); await shop.save();
   res.json({ success: true, shop });
+});
+
+// FIXED: Delete endpoint for fertilizer shops
+app.delete('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
+  try {
+    const shop = await FertilizerShop.findById(req.params.id);
+    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+    if (shop.addedBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') 
+      return res.status(403).json({ error: 'Unauthorized' });
+    
+    // Soft delete to be consistent with other endpoints
+    shop.isActive = false;
+    shop.updatedAt = new Date();
+    await shop.save();
+    res.json({ success: true, message: 'Shop deleted successfully' });
+  } catch (error) { 
+    res.status(500).json({ error: error.message }); 
+  }
 });
 
 app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
