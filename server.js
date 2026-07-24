@@ -133,13 +133,24 @@ const userSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 });
 
+// ==================== EQUIPMENT SCHEMA (UPDATED: supports rent AND/OR sale) ====================
 const equipmentSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true },
   teluguName: { type: String },
   category: { type: String, enum: ['Tractor', 'Harvester', 'Irrigation Pump', 'Power Tiller', 'Sprayer', 'Processing Machine', 'Trailer', 'Other'], required: true },
   description: { type: String },
-  pricing: { perDay: { type: Number, required: true }, perHour: { type: Number }, deposit: { type: Number, required: true } },
+
+  // NEW: what kind of listing this is
+  listingType: { type: String, enum: ['rent', 'sale', 'both'], default: 'rent', required: true },
+
+  pricing: {
+    perDay: { type: Number },      // required only if listingType is 'rent' or 'both' (validated below)
+    perHour: { type: Number },
+    deposit: { type: Number },     // required only if listingType is 'rent' or 'both'
+    salePrice: { type: Number },   // NEW — required only if listingType is 'sale' or 'both'
+  },
+
   location: { lat: { type: Number, required: true }, lng: { type: Number, required: true }, address: String, village: String, district: String },
   features: [String],
   images: [String],
@@ -147,8 +158,23 @@ const equipmentSchema = new mongoose.Schema({
   ratings: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
   isVerified: { type: Boolean, default: false },
   totalRentals: { type: Number, default: 0 },
+  totalSales: { type: Number, default: 0 },   // NEW
+  isSold: { type: Boolean, default: false },  // NEW — true once a 'sale'/'both' listing has been sold
   isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
+});
+
+// NEW: enforce correct pricing fields depending on listingType
+equipmentSchema.pre('validate', function (next) {
+  const type = this.listingType || 'rent';
+  if (['rent', 'both'].includes(type)) {
+    if (this.pricing?.perDay == null) return next(new Error('pricing.perDay is required for rental listings'));
+    if (this.pricing?.deposit == null) return next(new Error('pricing.deposit is required for rental listings'));
+  }
+  if (['sale', 'both'].includes(type)) {
+    if (this.pricing?.salePrice == null) return next(new Error('pricing.salePrice is required for sale listings'));
+  }
+  next();
 });
 
 const produceSchema = new mongoose.Schema({
@@ -163,10 +189,12 @@ const produceSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+// ==================== BOOKING SCHEMA (UPDATED: supports purchase transactions) ====================
 const bookingSchema = new mongoose.Schema({
   type: { type: String, enum: ['equipment', 'produce'], required: true },
+  transactionType: { type: String, enum: ['rental', 'purchase'], default: 'rental' }, // NEW
   itemId: { type: mongoose.Schema.Types.ObjectId, required: true },
-  renterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  renterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // acts as buyerId for purchases
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   startDate: Date, endDate: Date, quantity: Number, totalAmount: Number, deposit: Number,
   status: { type: String, enum: ['pending', 'confirmed', 'completed', 'cancelled'], default: 'pending' },
@@ -664,10 +692,11 @@ app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
 
 app.get('/api/admin/equipment', adminAuth, async (req, res) => {
   try {
-    const { category, isVerified, page = 1, limit = 50 } = req.query;
+    const { category, isVerified, listingType, page = 1, limit = 50 } = req.query;
     const query = {};
     if (category) query.category = category;
     if (isVerified !== undefined) query.isVerified = isVerified === 'true';
+    if (listingType) query.listingType = listingType; // NEW: filter admin view by listing type
     const total = await Equipment.countDocuments(query);
     const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.phone email').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, equipment, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit) } });
@@ -792,34 +821,64 @@ app.delete('/api/users/delete-account', authenticate, async (req, res) => {
   res.json({ success: true });
 });
 
-// ==================== EQUIPMENT ====================
+// ==================== EQUIPMENT (UPDATED: rent + sale) ====================
 app.get('/api/equipment', async (req, res) => {
-  const { category, search, owner } = req.query;
-  const query = { isActive: true };
-  if (category && category !== 'all') query.category = category;
-  if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
-  if (owner) query.ownerId = owner;
-  const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
-  res.json({ success: true, equipment });
+  try {
+    const { category, search, owner, listingType } = req.query;
+    // exclude sold-out items from the default listing feed
+    const query = { isActive: true, isSold: { $ne: true } };
+    if (category && category !== 'all') query.category = category;
+    if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
+    if (owner) query.ownerId = owner;
+    // NEW: filter by rent / sale / both. 'both' listings show up under either filter.
+    if (listingType && listingType !== 'all') {
+      query.$or = [...(query.$or || []), { listingType }, { listingType: 'both' }];
+    }
+    const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.profileImage verification.isVerified ratings').sort('-createdAt').limit(50);
+    res.json({ success: true, equipment });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/equipment/:id', async (req, res) => {
-  const equipment = await Equipment.findById(req.params.id).populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
-  if (!equipment) return res.status(404).json({ error: 'Not found' });
-  res.json({ success: true, equipment });
+  try {
+    const equipment = await Equipment.findById(req.params.id).populate('ownerId', 'profile.name profile.profileImage profile.phone verification.isVerified ratings');
+    if (!equipment) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true, equipment });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/equipment', authenticate, async (req, res) => {
-  const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
-  res.status(201).json({ success: true, equipment });
+  try {
+    // listingType defaults to 'rent' in the schema if not provided; validation enforces
+    // the right pricing fields for 'rent' / 'sale' / 'both'
+    const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
+    res.status(201).json({ success: true, equipment });
+  } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 app.put('/api/equipment/:id', authenticate, async (req, res) => {
-  const equipment = await Equipment.findById(req.params.id);
-  if (!equipment) return res.status(404).json({ error: 'Not found' });
-  if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  Object.assign(equipment, req.body); await equipment.save();
-  res.json({ success: true, equipment });
+  try {
+    const equipment = await Equipment.findById(req.params.id);
+    if (!equipment) return res.status(404).json({ error: 'Not found' });
+    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+    Object.assign(equipment, req.body); await equipment.save();
+    res.json({ success: true, equipment });
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// NEW: dedicated endpoint to switch a listing between rent / sale / both without a full PUT
+app.put('/api/equipment/:id/listing-type', authenticate, async (req, res) => {
+  try {
+    const { listingType, pricing } = req.body;
+    if (!['rent', 'sale', 'both'].includes(listingType)) return res.status(400).json({ error: 'Invalid listing type' });
+    const equipment = await Equipment.findById(req.params.id);
+    if (!equipment) return res.status(404).json({ error: 'Not found' });
+    if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+    equipment.listingType = listingType;
+    if (pricing) equipment.pricing = { ...equipment.pricing.toObject(), ...pricing };
+    await equipment.save(); // pre('validate') hook enforces correct pricing fields
+    res.json({ success: true, equipment });
+  } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 app.delete('/api/equipment/:id', authenticate, async (req, res) => {
@@ -870,23 +929,62 @@ app.delete('/api/produce/:id', authenticate, async (req, res) => {
   res.json({ success: true, message: 'Produce listing removed' });
 });
 
-// ==================== BOOKINGS ====================
+// ==================== BOOKINGS (UPDATED: handles equipment purchase too) ====================
 app.get('/api/bookings', authenticate, async (req, res) => {
   const bookings = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }).sort('-createdAt');
   res.json({ success: true, bookings });
 });
 
 app.post('/api/bookings', authenticate, async (req, res) => {
-  const booking = await Booking.create({ ...req.body, renterId: req.user._id });
-  res.status(201).json({ success: true, booking });
+  try {
+    const { type, itemId, transactionType } = req.body;
+
+    // NEW: equipment purchase flow
+    if (type === 'equipment' && transactionType === 'purchase') {
+      const equipment = await Equipment.findById(itemId);
+      if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
+      if (!['sale', 'both'].includes(equipment.listingType)) return res.status(400).json({ error: 'This equipment is not listed for sale' });
+      if (equipment.isSold) return res.status(400).json({ error: 'This equipment has already been sold' });
+      if (equipment.ownerId.toString() === req.user._id.toString()) return res.status(400).json({ error: 'You cannot purchase your own listing' });
+
+      const booking = await Booking.create({
+        type: 'equipment',
+        transactionType: 'purchase',
+        itemId,
+        renterId: req.user._id,
+        ownerId: equipment.ownerId,
+        totalAmount: equipment.pricing.salePrice,
+        status: 'pending',
+      });
+      return res.status(201).json({ success: true, booking });
+    }
+
+    // existing rental / produce flow, unchanged behavior
+    const booking = await Booking.create({ ...req.body, transactionType: 'rental', renterId: req.user._id });
+    res.status(201).json({ success: true, booking });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.put('/api/bookings/:id', authenticate, async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
-  if (!booking) return res.status(404).json({ error: 'Not found' });
-  if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
-  booking.status = req.body.status; await booking.save();
-  res.json({ success: true, booking });
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ error: 'Not found' });
+    if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
+    booking.status = req.body.status; await booking.save();
+
+    // NEW: when an equipment sale completes, mark the listing sold and hide it
+    if (booking.type === 'equipment' && booking.transactionType === 'purchase' && booking.status === 'completed') {
+      await Equipment.findByIdAndUpdate(booking.itemId, {
+        isSold: true,
+        isActive: false,
+        $inc: { totalSales: 1 },
+      });
+    } else if (booking.type === 'equipment' && booking.transactionType === 'rental' && booking.status === 'completed') {
+      await Equipment.findByIdAndUpdate(booking.itemId, { $inc: { totalRentals: 1 } });
+    }
+
+    res.json({ success: true, booking });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==================== PROBLEMS & SOLUTIONS ====================
@@ -990,7 +1088,7 @@ app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== LABOURERS (UPDATED) ====================
+// ==================== LABOURERS ====================
 app.get('/api/labourers/nearby', async (req, res) => {
   const { lat, lng, radius = 10, crop, village } = req.query;
   const query = { roles: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
@@ -1264,6 +1362,14 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   await connectDB();
   await connectImageDB();
+
+  // NEW: one-time migration for pre-existing equipment docs missing listingType
+  try {
+    await Equipment.updateMany({ listingType: { $exists: false } }, { $set: { listingType: 'rent' } });
+  } catch (err) {
+    console.error('Equipment listingType migration error:', err.message);
+  }
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`AgriAgent Server running on port ${PORT}`);
     console.log(`Image Storage: MongoDB GridFS (movie db)`);
