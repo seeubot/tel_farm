@@ -21,7 +21,9 @@
     "jsonwebtoken": "^9.0.2",
     "google-auth-library": "^9.0.0",
     "sharp": "^0.33.2",
-    "mongodb": "^6.3.0"
+    "mongodb": "^6.3.0",
+    "otplib": "^13.5.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
