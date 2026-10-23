@@ -18,12 +18,58 @@
 //   verifyMfaChallengeToken(token)
 //   encryptTotpSecret(plain) / decryptTotpSecret(enc)
 //   verifyTotpCode(plain, code)
+//
+// Compatible with otplib v12 (authenticator object) AND v13+ (functional API)
 // =================================================================
 
 'use strict';
 
 const ENC_PREFIX = 'mfa:v1';
 
+// ---- otplib v12/v13 compatibility wrapper ----
+function otplibGenerateSecret() {
+  const otplib = require('otplib');
+  // v13+ exports generateSecret as a top-level function
+  if (typeof otplib.generateSecret === 'function') {
+    return otplib.generateSecret();
+  }
+  // v12 exposes it on the `authenticator` object
+  if (otplib.authenticator && typeof otplib.authenticator.generateSecret === 'function') {
+    return otplib.authenticator.generateSecret();
+  }
+  throw new Error('[mfa] otplib generateSecret not found — check otplib version');
+}
+
+function otplibKeyUri(accountName, issuer, secret) {
+  const otplib = require('otplib');
+  // v13+ functional API
+  if (typeof otplib.generateURI === 'function') {
+    return otplib.generateURI({ secret, accountName, issuer });
+  }
+  if (typeof otplib.keyuri === 'function') {
+    return otplib.keyuri(accountName, issuer, secret);
+  }
+  // v12 authenticator object
+  if (otplib.authenticator && typeof otplib.authenticator.keyuri === 'function') {
+    return otplib.authenticator.keyuri(accountName, issuer, secret);
+  }
+  throw new Error('[mfa] otplib keyuri/generateURI not found — check otplib version');
+}
+
+function otplibVerify(token, secret) {
+  const otplib = require('otplib');
+  // v13+ functional API
+  if (typeof otplib.verify === 'function') {
+    return otplib.verify({ token, secret });
+  }
+  // v12 authenticator object
+  if (otplib.authenticator && typeof otplib.authenticator.verify === 'function') {
+    return otplib.authenticator.verify({ token, secret });
+  }
+  throw new Error('[mfa] otplib verify not found — check otplib version');
+}
+
+// ---- main register ----
 function register(app, deps) {
   const { Admin, adminAuth, jwt, crypto } = deps || {};
 
@@ -75,14 +121,12 @@ function register(app, deps) {
 
   // ---------- TOTP ----------
   function generateTotpSecret() {
-    const { authenticator } = require('otplib');
-    return authenticator.generateSecret();
+    return otplibGenerateSecret();
   }
 
   async function generateMfaQrDataUri(secret, accountName, issuer) {
     const QRCode = require('qrcode');
-    const { authenticator } = require('otplib');
-    const otpauth = authenticator.keyuri(accountName, issuer || 'AgriAgent Admin', secret);
+    const otpauth = otplibKeyUri(accountName, issuer || 'AgriAgent Admin', secret);
     return QRCode.toDataURL(otpauth);
   }
 
@@ -91,8 +135,7 @@ function register(app, deps) {
     const trimmed = String(code).trim();
     if (!/^\d{6}$/.test(trimmed)) return false;
     try {
-      const { authenticator } = require('otplib');
-      return authenticator.verify({ token: trimmed, secret: plainSecret });
+      return otplibVerify(trimmed, plainSecret);
     } catch (e) {
       console.error('[mfa] verify failed:', e.message);
       return false;
