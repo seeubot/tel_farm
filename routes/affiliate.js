@@ -14,6 +14,7 @@
 //     POST /api/affiliate/items/:id/click    -> track click, return redirect URL
 //
 //   ADMIN (adminAuth):
+//     GET    /api/admin/affiliate/items       -> list ALL items (active + inactive)
 //     POST   /api/admin/affiliate/items       -> create item
 //     PUT    /api/admin/affiliate/items/:id   -> update item
 //     DELETE /api/admin/affiliate/items/:id   -> soft delete
@@ -139,11 +140,6 @@ function register(app, deps) {
       const authHeader = req.headers.authorization || '';
       if (authHeader.startsWith('Bearer ')) {
         try {
-          // Call authenticate-like logic manually — we don't want to fail the
-          // whole request if the token is bad (anonymous clicks should work).
-          // Since server.js already has `authenticate`, we could call it,
-          // but it writes to req.user and returns 401 on bad token.
-          // For clicks, we only want to *try* to get the user.
           const token = authHeader.split(' ')[1];
           const jwt = require('jsonwebtoken');
           const JWT_SECRET = process.env.JWT_SECRET || 'agriagent-secret-key';
@@ -163,7 +159,6 @@ function register(app, deps) {
           clickedAt: { $gte: cutoff },
         }).lean();
         if (recent) {
-          // Don't record a duplicate, but still return the URL
           return res.json({ success: true, redirectUrl: item.productUrl, duplicate: true });
         }
       }
@@ -180,7 +175,6 @@ function register(app, deps) {
           clickedAt: new Date(),
         });
       } catch (logErr) {
-        // Logging should never block the redirect
         console.error('[affiliate] click log failed:', logErr.message);
       }
 
@@ -193,6 +187,55 @@ function register(app, deps) {
   });
 
   // ==================== ADMIN ROUTES ====================
+
+  // ---- GET /api/admin/affiliate/items ----
+  // Admin version of the list. Unlike the public endpoint, returns
+  // ALL items (active + inactive) with optional filters.
+  app.get('/api/admin/affiliate/items', adminAuth, async (req, res) => {
+    try {
+      const { platform, category, isActive, search } = req.query;
+      const page = toPositiveInt(req.query.page, 1, 10000);
+      const limit = toPositiveInt(req.query.limit, 100, 200);
+      const skip = (page - 1) * limit;
+
+      const query = {};
+      if (platform && platform !== 'all') query.platform = platform;
+      if (category && category !== 'all') query.category = category;
+      if (isActive === 'true') query.isActive = true;
+      else if (isActive === 'false') query.isActive = false;
+      // if isActive not provided → return both active + inactive
+      if (search) {
+        query.$or = [
+          { title: { $regex: String(search), $options: 'i' } },
+          { teluguTitle: { $regex: String(search), $options: 'i' } },
+          { description: { $regex: String(search), $options: 'i' } },
+        ];
+      }
+
+      const [total, items] = await Promise.all([
+        AffiliateItem.countDocuments(query),
+        AffiliateItem.find(query)
+          .sort({ displayOrder: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+      ]);
+
+      res.json({
+        success: true,
+        items,
+        pagination: {
+          total,
+          page,
+          limit,
+          pages: Math.ceil(total / limit) || 1,
+        },
+      });
+    } catch (error) {
+      console.error('[affiliate] admin list error:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
 
   // ---- POST /api/admin/affiliate/items ----
   app.post('/api/admin/affiliate/items', adminAuth, async (req, res) => {
@@ -208,8 +251,6 @@ function register(app, deps) {
         return res.status(400).json({ error: 'title and productUrl are required' });
       }
 
-      // Reject javascript: / data: URLs in productUrl (defense against XSS
-      // if a compromised admin account tries to inject a malicious redirect)
       if (!/^https?:\/\//i.test(productUrl)) {
         return res.status(400).json({ error: 'productUrl must be http(s)' });
       }
@@ -242,7 +283,6 @@ function register(app, deps) {
       const item = await AffiliateItem.findById(req.params.id);
       if (!item) return res.status(404).json({ error: 'Item not found' });
 
-      // If productUrl is being updated, validate it the same way
       if (req.body.productUrl && !/^https?:\/\//i.test(req.body.productUrl)) {
         return res.status(400).json({ error: 'productUrl must be http(s)' });
       }
@@ -283,14 +323,11 @@ function register(app, deps) {
   });
 
   // ---- GET /api/admin/affiliate/stats ----
-  // Returns per-item click counts and estimated revenue (clicks × commissionRate).
-  // Optional query: ?days=30 (default 30, max 365)
   app.get('/api/admin/affiliate/stats', adminAuth, async (req, res) => {
     try {
       const days = toPositiveInt(req.query.days, 30, 365);
       const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-      // Aggregate clicks grouped by itemId
       const grouped = await AffiliateClick.aggregate([
         { $match: { clickedAt: { $gte: since } } },
         {
@@ -304,7 +341,6 @@ function register(app, deps) {
         { $limit: 100 },
       ]);
 
-      // Enrich with item details
       const itemIds = grouped.map(g => g._id);
       const items = await AffiliateItem.find({ _id: { $in: itemIds } })
         .select('title platform commissionRate isActive')
@@ -315,9 +351,6 @@ function register(app, deps) {
         const it = itemMap.get(String(g._id)) || {};
         const clicks = g.clicks;
         const rate = it.commissionRate || 0;
-        // Estimated revenue = clicks × commissionRate%
-        // NOTE: this is *rough* — actual commission depends on conversion
-        // rate and cart value on the affiliate platform. Use it as a proxy.
         const estimatedRevenue = Math.round(clicks * rate * 100) / 100;
         return {
           itemId: g._id,
@@ -331,7 +364,6 @@ function register(app, deps) {
         };
       });
 
-      // Total metrics
       const totalClicks = rows.reduce((s, r) => s + r.clicks, 0);
       const totalEstimatedRevenue = Math.round(
         rows.reduce((s, r) => s + r.estimatedRevenue, 0) * 100
@@ -349,7 +381,6 @@ function register(app, deps) {
     }
   });
 
-  // Silence unused var warning in some linters
   void User;
 }
 
