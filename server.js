@@ -10,6 +10,10 @@ const multer = require('multer');
 const sharp = require('sharp');
 const crypto = require('crypto');
 const { GridFSBucket } = require('mongodb');
+const { register: registerMfaRoutes } = require('./routes/mfa');
+const { register: registerAffiliateRoutes } = require('./routes/affiliate');
+const { createModel: createAffiliateItemModel } = require('./models/AffiliateItem');
+const { createModel: createAffiliateClickModel } = require('./models/AffiliateClick');
 require('dotenv').config();
 
 const app = express();
@@ -283,7 +287,10 @@ const adminSchema = new mongoose.Schema({
   role: { type: String, enum: ['admin', 'superadmin'], default: 'admin' },
   lastLogin: Date,
   isActive: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  mfaEnabled: { type: Boolean, default: false },
+  mfaSecret: { type: String },
+  mfaEnabledAt: { type: Date }
 });
 
 adminSchema.pre('save', async function(next) {
@@ -310,6 +317,10 @@ const FertilizerShop = mongoose.model('FertilizerShop', fertilizerShopSchema);
 const Ad = mongoose.model('Ad', adSchema);
 const Payment = mongoose.model('Payment', paymentSchema);
 const Admin = mongoose.model('Admin', adminSchema);
+
+// Create Affiliate models (factory functions from models/ files)
+const AffiliateItem = createAffiliateItemModel(mongoose);
+const AffiliateClick = createAffiliateClickModel(mongoose);
 
 // ==================== AUTH MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
@@ -386,6 +397,18 @@ const adminAuth = async (req, res, next) => {
     next();
   } catch (error) { res.status(401).json({ error: 'Authentication failed' }); }
 };
+
+// Wire MFA routes (Admin, adminAuth, jwt, crypto — all defined above)
+registerMfaRoutes(app, { Admin, adminAuth, jwt, crypto });
+
+// Wire Affiliate routes
+registerAffiliateRoutes(app, {
+  adminAuth,
+  authenticate,
+  AffiliateItem,
+  AffiliateClick,
+  User,
+});
 
 // ==================== HELPER ====================
 const calculateDistance = (lat1, lng1, lat2, lng2) => {
@@ -534,6 +557,19 @@ app.post('/api/admin/login', async (req, res) => {
     if (!adminUser) return res.status(401).json({ error: 'Invalid credentials' });
     const isMatch = await adminUser.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+
+    // MFA branch — if enabled, return a short-lived challenge token
+    if (adminUser.mfaEnabled) {
+      const mfaToken = registerMfaRoutes.generateMfaChallengeToken(adminUser._id);
+      return res.json({
+        success: true,
+        requiresMfa: true,
+        mfaToken,
+        admin: { username: adminUser.username, email: adminUser.email },
+      });
+    }
+
+    // No MFA — normal login (identical to previous behavior)
     adminUser.lastLogin = new Date();
     await adminUser.save();
     const token = jwt.sign({ adminId: adminUser._id, role: adminUser.role, type: 'admin' }, process.env.JWT_SECRET || 'agriagent-secret-key', { expiresIn: '12h' });
