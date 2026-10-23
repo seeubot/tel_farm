@@ -33,7 +33,7 @@ const connectDB = async () => {
   }
 };
 
-// ==================== IMAGE DATABASE (Movie MongoDB) ====================
+// ==================== IMAGE DATABASE ====================
 const IMAGE_MONGO_URI = process.env.IMAGE_MONGO_URI || 'mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?appName=movie';
 let imageDb;
 let gridfsBucket;
@@ -137,24 +137,19 @@ const userSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 });
 
-// ==================== EQUIPMENT SCHEMA (UPDATED: supports rent AND/OR sale) ====================
 const equipmentSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true },
   teluguName: { type: String },
   category: { type: String, enum: ['Tractor', 'Harvester', 'Irrigation Pump', 'Power Tiller', 'Sprayer', 'Processing Machine', 'Trailer', 'Other'], required: true },
   description: { type: String },
-
-  // NEW: what kind of listing this is
   listingType: { type: String, enum: ['rent', 'sale', 'both'], default: 'rent', required: true },
-
   pricing: {
-    perDay: { type: Number },      // required only if listingType is 'rent' or 'both' (validated below)
+    perDay: { type: Number },
     perHour: { type: Number },
-    deposit: { type: Number },     // required only if listingType is 'rent' or 'both'
-    salePrice: { type: Number },   // NEW — required only if listingType is 'sale' or 'both'
+    deposit: { type: Number },
+    salePrice: { type: Number },
   },
-
   location: { lat: { type: Number, required: true }, lng: { type: Number, required: true }, address: String, village: String, district: String },
   features: [String],
   images: [String],
@@ -162,13 +157,12 @@ const equipmentSchema = new mongoose.Schema({
   ratings: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
   isVerified: { type: Boolean, default: false },
   totalRentals: { type: Number, default: 0 },
-  totalSales: { type: Number, default: 0 },   // NEW
-  isSold: { type: Boolean, default: false },  // NEW — true once a 'sale'/'both' listing has been sold
+  totalSales: { type: Number, default: 0 },
+  isSold: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
 });
 
-// NEW: enforce correct pricing fields depending on listingType
 equipmentSchema.pre('validate', function (next) {
   const type = this.listingType || 'rent';
   if (['rent', 'both'].includes(type)) {
@@ -193,12 +187,11 @@ const produceSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-// ==================== BOOKING SCHEMA (UPDATED: supports purchase transactions) ====================
 const bookingSchema = new mongoose.Schema({
   type: { type: String, enum: ['equipment', 'produce'], required: true },
-  transactionType: { type: String, enum: ['rental', 'purchase'], default: 'rental' }, // NEW
+  transactionType: { type: String, enum: ['rental', 'purchase'], default: 'rental' },
   itemId: { type: mongoose.Schema.Types.ObjectId, required: true },
-  renterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // acts as buyerId for purchases
+  renterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   startDate: Date, endDate: Date, quantity: Number, totalAmount: Number, deposit: Number,
   status: { type: String, enum: ['pending', 'confirmed', 'completed', 'cancelled'], default: 'pending' },
@@ -318,7 +311,7 @@ const Ad = mongoose.model('Ad', adSchema);
 const Payment = mongoose.model('Payment', paymentSchema);
 const Admin = mongoose.model('Admin', adminSchema);
 
-// Create Affiliate models (factory functions from models/ files)
+// Create Affiliate models
 const AffiliateItem = createAffiliateItemModel(mongoose);
 const AffiliateClick = createAffiliateClickModel(mongoose);
 
@@ -398,7 +391,7 @@ const adminAuth = async (req, res, next) => {
   } catch (error) { res.status(401).json({ error: 'Authentication failed' }); }
 };
 
-// Wire MFA routes (Admin, adminAuth, jwt, crypto — all defined above)
+// Wire MFA routes
 registerMfaRoutes(app, { Admin, adminAuth, jwt, crypto });
 
 // Wire Affiliate routes
@@ -420,7 +413,7 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
 };
 
-// ==================== IMAGE UPLOAD ROUTES (MongoDB GridFS) ====================
+// ==================== IMAGE UPLOAD ROUTES ====================
 app.post('/api/upload/image', authenticate, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -558,7 +551,7 @@ app.post('/api/admin/login', async (req, res) => {
     const isMatch = await adminUser.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // MFA branch — if enabled, return a short-lived challenge token
+    // MFA branch
     if (adminUser.mfaEnabled) {
       const mfaToken = registerMfaRoutes.generateMfaChallengeToken(adminUser._id);
       return res.json({
@@ -569,7 +562,6 @@ app.post('/api/admin/login', async (req, res) => {
       });
     }
 
-    // No MFA — normal login (identical to previous behavior)
     adminUser.lastLogin = new Date();
     await adminUser.save();
     const token = jwt.sign({ adminId: adminUser._id, role: adminUser.role, type: 'admin' }, process.env.JWT_SECRET || 'agriagent-secret-key', { expiresIn: '12h' });
@@ -578,7 +570,17 @@ app.post('/api/admin/login', async (req, res) => {
 });
 
 app.get('/api/admin/session', adminAuth, async (req, res) => {
-  res.json({ success: true, admin: { id: req.admin._id, username: req.admin.username, email: req.admin.email, role: req.admin.role } });
+  res.json({
+    success: true,
+    admin: {
+      id: req.admin._id,
+      username: req.admin.username,
+      email: req.admin.email,
+      role: req.admin.role,
+      mfaEnabled: req.admin.mfaEnabled || false,
+      mfaEnabledAt: req.admin.mfaEnabledAt || null,
+    },
+  });
 });
 
 app.post('/api/admin/setup', async (req, res) => {
@@ -632,6 +634,30 @@ app.get('/api/admin/users/:id', adminAuth, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     const [equipment, produce, bookings] = await Promise.all([Equipment.find({ ownerId: user._id }), Produce.find({ farmerId: user._id }), Booking.find({ $or: [{ renterId: user._id }, { ownerId: user._id }] })]);
     res.json({ success: true, user, details: { equipmentCount: equipment.length, produceCount: produce.length, bookingCount: bookings.length } });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// NEW: admin can edit user info
+app.put('/api/admin/users/:id', adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const { name, teluguName, phone, village, district, address, isVerified } = req.body;
+
+    if (name !== undefined) user.profile.name = name;
+    if (teluguName !== undefined) user.profile.teluguName = teluguName;
+    if (phone !== undefined) user.profile.phone = phone;
+    if (village !== undefined) user.profile.location = { ...(user.profile.location || {}), village };
+    if (district !== undefined) user.profile.location = { ...(user.profile.location || {}), district };
+    if (address !== undefined) user.profile.location = { ...(user.profile.location || {}), address };
+    if (isVerified !== undefined) {
+      user.verification.isVerified = !!isVerified;
+      if (isVerified) user.verification.verifiedAt = new Date();
+    }
+    user.updatedAt = new Date();
+    await user.save();
+    res.json({ success: true, user });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -732,7 +758,7 @@ app.get('/api/admin/equipment', adminAuth, async (req, res) => {
     const query = {};
     if (category) query.category = category;
     if (isVerified !== undefined) query.isVerified = isVerified === 'true';
-    if (listingType) query.listingType = listingType; // NEW: filter admin view by listing type
+    if (listingType) query.listingType = listingType;
     const total = await Equipment.countDocuments(query);
     const equipment = await Equipment.find(query).populate('ownerId', 'profile.name profile.phone email').sort('-createdAt').skip((page - 1) * limit).limit(parseInt(limit));
     res.json({ success: true, equipment, pagination: { total, page: parseInt(page), pages: Math.ceil(total / limit) } });
@@ -745,6 +771,19 @@ app.put('/api/admin/equipment/:id/verify', adminAuth, async (req, res) => {
     if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
     res.json({ success: true, equipment });
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// NEW: admin delete equipment
+app.delete('/api/admin/equipment/:id', adminAuth, async (req, res) => {
+  try {
+    const equipment = await Equipment.findById(req.params.id);
+    if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
+    await equipment.deleteOne();
+    res.json({ success: true, message: 'Equipment listing deleted' });
+  } catch (error) {
+    if (error.name === 'CastError') return res.status(400).json({ error: 'Invalid equipment ID' });
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/api/admin/shops', adminAuth, async (req, res) => {
@@ -772,11 +811,8 @@ app.get('/api/auth/google-mobile/callback', async (req, res) => {
     const { code, state: codeVerifier, error: googleError } = req.query;
     if (googleError) return res.redirect(302, `agriagent://auth?error=${encodeURIComponent(googleError)}`);
     if (!code || !codeVerifier) return res.redirect(302, `agriagent://auth?error=Missing parameters`);
-
-    // Fixed redirect_uri to match exactly what's registered in Google Cloud Console
     const redirectUri = `https://agriagentt.vercel.app/api/auth/google-mobile/callback`;
     console.log('[OAuth] Token exchange redirect_uri:', redirectUri);
-
     const { tokens } = await googleOAuthClient.getToken({ code, codeVerifier, redirect_uri: redirectUri });
     if (!tokens.access_token) return res.redirect(302, `agriagent://auth?error=Failed to obtain token`);
     const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
@@ -857,16 +893,14 @@ app.delete('/api/users/delete-account', authenticate, async (req, res) => {
   res.json({ success: true });
 });
 
-// ==================== EQUIPMENT (UPDATED: rent + sale) ====================
+// ==================== EQUIPMENT ====================
 app.get('/api/equipment', async (req, res) => {
   try {
     const { category, search, owner, listingType } = req.query;
-    // exclude sold-out items from the default listing feed
     const query = { isActive: true, isSold: { $ne: true } };
     if (category && category !== 'all') query.category = category;
     if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { teluguName: { $regex: search, $options: 'i' } }];
     if (owner) query.ownerId = owner;
-    // NEW: filter by rent / sale / both. 'both' listings show up under either filter.
     if (listingType && listingType !== 'all') {
       query.$or = [...(query.$or || []), { listingType }, { listingType: 'both' }];
     }
@@ -885,8 +919,6 @@ app.get('/api/equipment/:id', async (req, res) => {
 
 app.post('/api/equipment', authenticate, async (req, res) => {
   try {
-    // listingType defaults to 'rent' in the schema if not provided; validation enforces
-    // the right pricing fields for 'rent' / 'sale' / 'both'
     const equipment = await Equipment.create({ ...req.body, ownerId: req.user._id });
     res.status(201).json({ success: true, equipment });
   } catch (error) { res.status(400).json({ error: error.message }); }
@@ -902,7 +934,6 @@ app.put('/api/equipment/:id', authenticate, async (req, res) => {
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
-// NEW: dedicated endpoint to switch a listing between rent / sale / both without a full PUT
 app.put('/api/equipment/:id/listing-type', authenticate, async (req, res) => {
   try {
     const { listingType, pricing } = req.body;
@@ -912,7 +943,7 @@ app.put('/api/equipment/:id/listing-type', authenticate, async (req, res) => {
     if (equipment.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
     equipment.listingType = listingType;
     if (pricing) equipment.pricing = { ...equipment.pricing.toObject(), ...pricing };
-    await equipment.save(); // pre('validate') hook enforces correct pricing fields
+    await equipment.save();
     res.json({ success: true, equipment });
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
@@ -965,7 +996,7 @@ app.delete('/api/produce/:id', authenticate, async (req, res) => {
   res.json({ success: true, message: 'Produce listing removed' });
 });
 
-// ==================== BOOKINGS (UPDATED: handles equipment purchase too) ====================
+// ==================== BOOKINGS ====================
 app.get('/api/bookings', authenticate, async (req, res) => {
   const bookings = await Booking.find({ $or: [{ renterId: req.user._id }, { ownerId: req.user._id }] }).sort('-createdAt');
   res.json({ success: true, bookings });
@@ -974,28 +1005,19 @@ app.get('/api/bookings', authenticate, async (req, res) => {
 app.post('/api/bookings', authenticate, async (req, res) => {
   try {
     const { type, itemId, transactionType } = req.body;
-
-    // NEW: equipment purchase flow
     if (type === 'equipment' && transactionType === 'purchase') {
       const equipment = await Equipment.findById(itemId);
       if (!equipment) return res.status(404).json({ error: 'Equipment not found' });
       if (!['sale', 'both'].includes(equipment.listingType)) return res.status(400).json({ error: 'This equipment is not listed for sale' });
       if (equipment.isSold) return res.status(400).json({ error: 'This equipment has already been sold' });
       if (equipment.ownerId.toString() === req.user._id.toString()) return res.status(400).json({ error: 'You cannot purchase your own listing' });
-
       const booking = await Booking.create({
-        type: 'equipment',
-        transactionType: 'purchase',
-        itemId,
-        renterId: req.user._id,
-        ownerId: equipment.ownerId,
-        totalAmount: equipment.pricing.salePrice,
-        status: 'pending',
+        type: 'equipment', transactionType: 'purchase', itemId,
+        renterId: req.user._id, ownerId: equipment.ownerId,
+        totalAmount: equipment.pricing.salePrice, status: 'pending',
       });
       return res.status(201).json({ success: true, booking });
     }
-
-    // existing rental / produce flow, unchanged behavior
     const booking = await Booking.create({ ...req.body, transactionType: 'rental', renterId: req.user._id });
     res.status(201).json({ success: true, booking });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1007,18 +1029,11 @@ app.put('/api/bookings/:id', authenticate, async (req, res) => {
     if (!booking) return res.status(404).json({ error: 'Not found' });
     if (booking.ownerId.toString() !== req.user._id.toString() && req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
     booking.status = req.body.status; await booking.save();
-
-    // NEW: when an equipment sale completes, mark the listing sold and hide it
     if (booking.type === 'equipment' && booking.transactionType === 'purchase' && booking.status === 'completed') {
-      await Equipment.findByIdAndUpdate(booking.itemId, {
-        isSold: true,
-        isActive: false,
-        $inc: { totalSales: 1 },
-      });
+      await Equipment.findByIdAndUpdate(booking.itemId, { isSold: true, isActive: false, $inc: { totalSales: 1 } });
     } else if (booking.type === 'equipment' && booking.transactionType === 'rental' && booking.status === 'completed') {
       await Equipment.findByIdAndUpdate(booking.itemId, { $inc: { totalRentals: 1 } });
     }
-
     res.json({ success: true, booking });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1128,9 +1143,7 @@ app.post('/api/solutions/:id/upvote', authenticate, async (req, res) => {
 app.get('/api/labourers/nearby', async (req, res) => {
   const { lat, lng, radius = 10, crop, village } = req.query;
   const query = { roles: 'labourer', 'labourerDetails.isAvailable': true, isActive: true };
-  
   if (crop && crop !== 'all' && crop !== 'All crops') query['labourerDetails.skills'] = crop;
-  
   if (village) {
     query.$or = [
       { 'profile.location.village': { $regex: village, $options: 'i' } },
@@ -1138,48 +1151,26 @@ app.get('/api/labourers/nearby', async (req, res) => {
       { 'profile.location.district': { $regex: village, $options: 'i' } }
     ];
   }
-  
-  let labourers = await User.find(query)
-    .select('profile labourerDetails ratings verification email')
-    .sort('-ratings.average')
-    .limit(100);
-  
+  let labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(100);
   if (lat && lng) {
     labourers = labourers.map(l => {
       const labourerLat = l.profile.location?.lat;
       const labourerLng = l.profile.location?.lng;
-      const distance = calculateDistance(
-        parseFloat(lat), 
-        parseFloat(lng), 
-        labourerLat, 
-        labourerLng
-      );
-      
+      const distance = calculateDistance(parseFloat(lat), parseFloat(lng), labourerLat, labourerLng);
       const serviceRadius = l.labourerDetails?.serviceRadius || 10;
       const searchRadius = Number(radius);
       const effectiveRadius = Math.min(serviceRadius, searchRadius);
-      
-      return { 
-        ...l.toObject(), 
-        distance,
-        serviceRadius,
-        withinRange: distance <= effectiveRadius
-      };
-    })
-    .filter(l => l.withinRange)
-    .sort((a, b) => a.distance - b.distance);
+      return { ...l.toObject(), distance, serviceRadius, withinRange: distance <= effectiveRadius };
+    }).filter(l => l.withinRange).sort((a, b) => a.distance - b.distance);
   }
-  
   res.json({ success: true, labourers });
 });
 
 app.get('/api/labourers', async (req, res) => {
   const { crop, isAvailable, village } = req.query;
   const query = { roles: 'labourer', isActive: true };
-  
   if (crop && crop !== 'all' && crop !== 'All crops') query['labourerDetails.skills'] = crop;
   if (isAvailable !== undefined) query['labourerDetails.isAvailable'] = isAvailable === 'true';
-  
   if (village) {
     query.$or = [
       { 'profile.location.village': { $regex: village, $options: 'i' } },
@@ -1187,12 +1178,7 @@ app.get('/api/labourers', async (req, res) => {
       { 'profile.location.district': { $regex: village, $options: 'i' } }
     ];
   }
-  
-  const labourers = await User.find(query)
-    .select('profile labourerDetails ratings verification email')
-    .sort('-ratings.average')
-    .limit(100);
-  
+  const labourers = await User.find(query).select('profile labourerDetails ratings verification email').sort('-ratings.average').limit(100);
   res.json({ success: true, labourers });
 });
 
@@ -1268,22 +1254,17 @@ app.put('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   res.json({ success: true, shop });
 });
 
-// FIXED: Delete endpoint for fertilizer shops
 app.delete('/api/fertilizer-shops/:id', authenticate, async (req, res) => {
   try {
     const shop = await FertilizerShop.findById(req.params.id);
     if (!shop) return res.status(404).json({ error: 'Shop not found' });
     if (shop.addedBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') 
       return res.status(403).json({ error: 'Unauthorized' });
-    
-    // Soft delete to be consistent with other endpoints
     shop.isActive = false;
     shop.updatedAt = new Date();
     await shop.save();
     res.json({ success: true, message: 'Shop deleted successfully' });
-  } catch (error) { 
-    res.status(500).json({ error: error.message }); 
-  }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/fertilizer-shops/:id/rate', authenticate, async (req, res) => {
@@ -1399,7 +1380,6 @@ const startServer = async () => {
   await connectDB();
   await connectImageDB();
 
-  // NEW: one-time migration for pre-existing equipment docs missing listingType
   try {
     await Equipment.updateMany({ listingType: { $exists: false } }, { $set: { listingType: 'rent' } });
   } catch (err) {
