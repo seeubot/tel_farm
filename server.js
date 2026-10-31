@@ -78,9 +78,18 @@ const googleOAuthClient = new OAuth2Client(
 );
 
 // ==================== MIDDLEWARE ====================
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+// helmet defaults Cross-Origin-Resource-Policy to "same-origin", which makes browsers
+// block images/media loaded from another origin (e.g. your website). Allow cross-origin.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+// NOTE: '*' inside an origin array is NOT treated as a wildcard by the cors package,
+// so unknown origins (your deployed website) were getting no CORS headers.
+// `origin: true` reflects the requesting origin, which also works with credentials.
 app.use(cors({
-  origin: ['http://localhost:19000', 'http://localhost:19006', 'http://localhost:3000', 'exp://*', '*'],
+  origin: true,
   credentials: true,
 }));
 app.use(express.json());
@@ -96,7 +105,13 @@ const upload = multer({
   },
 });
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Too many requests' } });
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests' },
+  // Pages load many images at once; don't let them burn through (and get blocked by) the API limit
+  skip: (req) => req.method === 'GET' && req.path.startsWith('/images/'),
+});
 app.use('/api/', limiter);
 
 // ==================== MODELS ====================
@@ -495,7 +510,12 @@ app.get('/api/images/:id', async (req, res) => {
     const _id = new mongoose.Types.ObjectId(req.params.id);
     const files = await imageDb.collection('agriagent_images.files').findOne({ _id });
     if (!files) return res.status(404).json({ error: 'Image not found' });
-    res.set({ 'Content-Type': files.contentType || 'image/webp', 'Cache-Control': 'public, max-age=31536000' });
+    res.set({
+      'Content-Type': files.contentType || 'image/webp',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Access-Control-Allow-Origin': '*',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+    });
     const downloadStream = gridfsBucket.openDownloadStream(_id);
     downloadStream.pipe(res);
     downloadStream.on('error', () => res.status(404).json({ error: 'Image not found' }));
