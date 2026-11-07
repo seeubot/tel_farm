@@ -85,12 +85,28 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
-// NOTE: '*' inside an origin array is NOT treated as a wildcard by the cors package,
-// so unknown origins (your deployed website) were getting no CORS headers.
-// `origin: true` reflects the requesting origin, which also works with credentials.
+// Allowed website origins. An origin is scheme + host (+ port) only, so the paths
+// /store etc. are covered automatically by https://agriagent-site.vercel.app.
+// Extra origins can be added via the CORS_ORIGINS env var (comma-separated).
+const allowedOrigins = [
+  'https://agriagent-site.vercel.app',
+  'http://localhost:19000',
+  'http://localhost:19006',
+  'http://localhost:8081',
+  'http://localhost:3000',
+  ...(process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean) : []),
+];
 app.use(cors({
-  origin: true,
+  origin: (origin, callback) => {
+    // No Origin header = native mobile app, curl, server-to-server: allow
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false); // not allowed: no CORS headers are sent
+  },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  maxAge: 86400,
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
